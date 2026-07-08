@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>braid — control panel</title>
+<style>
+  :root {
+    --bg: #0b0e14; --card: #121826; --card2: #0e1420; --border: #1e2637; --text: #e6edf3;
+    --muted: #8b98ab; --green: #3fb950; --red: #f85149; --amber: #d29922; --cyan: #39c5cf;
+    --accent: #4493f8;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, "Segoe UI", sans-serif; padding: 22px; max-width: 1150px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  h1 { font-size: 20px; font-weight: 650; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 10px; }
+  #status { color: var(--muted); font-size: 13px; }
+  #status.offline { color: var(--red); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+  .hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+
+  .pill { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; border-radius: 999px; padding: 4px 12px; background: #1a212f; color: var(--muted); }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.on { background: rgba(63, 185, 80, .12); color: var(--green); }
+  .pill.on .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+
+  .capture-status { display: flex; flex-direction: column; gap: 5px; margin: 14px 0; font-size: 13px; color: var(--muted); }
+  .capture-status b { color: var(--text); font-weight: 500; }
+  .check { color: var(--green); } .cross { color: var(--muted); }
+
+  button { font: inherit; border: 1px solid var(--border); border-radius: 9px; padding: 9px 16px; cursor: pointer; background: #1a212f; color: var(--text); font-weight: 600; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: rgba(248, 81, 73, .15); border-color: rgba(248, 81, 73, .4); color: var(--red); }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  #captureMsg { font-size: 12.5px; color: var(--amber); margin-top: 8px; min-height: 18px; }
+
+  .total { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .total .big { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .total .unit { color: var(--muted); font-size: 13px; }
+  .subtotal { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; font-variant-numeric: tabular-nums; }
+  .bond-row { display: grid; grid-template-columns: 130px 1fr 90px; align-items: center; gap: 10px; padding: 5px 0; font-size: 13px; }
+  .bond-row .name { display: flex; align-items: center; gap: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .bond-row .rate { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .bar { height: 8px; border-radius: 4px; background: #1a212f; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width .5s; }
+  .bond-row.dead .bar i { background: var(--red); }
+
+  .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .seg { display: inline-flex; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
+  .seg button { border: 0; background: transparent; padding: 6px 14px; border-radius: 7px; font-weight: 500; color: var(--muted); }
+  .seg button.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .controls .hint { margin: 0; }
+
+  .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .link { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .link.down { border-color: rgba(248, 81, 73, .55); }
+  .link.disabled { opacity: .55; }
+  .link h3 { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 9px; }
+  .link h3 .ip { color: var(--muted); font-weight: 400; font-size: 12.5px; margin-left: auto; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); flex: none; }
+  .down .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .disabled .dot { background: var(--muted); box-shadow: none; }
+  .meta { display: flex; gap: 13px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; margin: 8px 0 10px; font-variant-numeric: tabular-nums; }
+  .meta b { color: var(--text); font-weight: 600; }
+  canvas { width: 100%; height: 52px; display: block; }
+  .link-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  .switch { position: relative; width: 36px; height: 20px; flex: none; cursor: pointer; }
+  .switch input { display: none; }
+  .switch span { position: absolute; inset: 0; border-radius: 999px; background: #2a3245; transition: .2s; }
+  .switch span::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #8b98ab; transition: .2s; }
+  .switch input:checked + span { background: var(--green); }
+  .switch input:checked + span::after { left: 18px; background: #fff; }
+
+  .events { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .events ul { list-style: none; font-size: 13px; max-height: 210px; overflow-y: auto; }
+  .events li { padding: 3px 0; color: var(--muted); }
+  .events li b { color: var(--text); font-weight: 500; }
+  .events li.down b { color: var(--red); }
+  .events li.up b { color: var(--green); }
+</style>
+</head>
+<body>
+<header>
+  <h1>braid <small>every link, one connection</small></h1>
+  <div id="status">connecting…</div>
+</header>
+
+<div class="hero">
+  <div class="card">
+    <h2>System-wide capture — all Windows apps</h2>
+    <span class="pill" id="capturePill"><span class="dot"></span><span id="capturePillText">checking…</span></span>
+    <div class="capture-status" id="captureStatus"></div>
+    <button id="captureBtn" disabled>…</button>
+    <div id="captureMsg"></div>
+    <div class="hint">
+      Creates the virtual <b>braid</b> network adapter and routes every app through the bond —
+      no proxy settings needed. Requires admin (UAC prompt). First enable downloads the
+      packet engine (~4 MB, tun2socks + Wintun, checksum-verified).
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Bonded connection</h2>
+    <div class="total"><span class="big" id="totalDown">0</span><span class="unit" id="totalDownUnit">MB/s down · 0 Mbps</span></div>
+    <div class="subtotal" id="totalUp">↑ 0 B/s up · 0 active connections</div>
+    <div id="bondRows"></div>
+  </div>
+</div>
+
+<div class="controls">
+  <div class="seg" id="strategySeg"></div>
+  <span class="hint" id="strategyHint"></span>
+</div>
+
+<div class="links" id="links"></div>
+<div class="events"><h2 style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Events</h2><ul id="events"><li>—</li></ul></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const STRATEGY_HINTS = {
+  balanced: 'connections rotate across healthy links (weights respected)',
+  'least-busy': 'new connections go to the link with the fewest active ones',
+  failover: 'first link carries everything; the rest are hot backups',
+};
+
+function fmt(value, units) {
+  let n = value, u = 0;
+  while (n >= 1000 && u < units.length - 1) { n /= 1024; u += 1; }
+  return `${n < 10 && u > 0 ? n.toFixed(1) : Math.round(n)} ${units[u]}`;
+}
+const fmtRate = (n) => fmt(n, ['B/s', 'KB/s', 'MB/s', 'GB/s']);
+const fmtBytes = (n) => fmt(n, ['B', 'KB', 'MB', 'GB', 'TB']);
+const mbps = (n) => (n * 8 / 1e6).toFixed(n * 8 >= 1e7 ? 0 : 1);
+
+function api(path, body) {
+  return fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-braid': '1' },
+    body: JSON.stringify(body ?? {}),
+  }).then((r) => r.json());
+}
+
+function sparkline(canvas, history) {
+  const scale = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  ctx.clearRect(0, 0, width, height);
+  if (history.length < 2) return;
+  const max = Math.max(10240, ...history.map((p) => Math.max(p.i, p.o)));
+  const step = width / (history.length - 1);
+  const draw = (key, color, fill) => {
+    ctx.beginPath();
+    history.forEach((p, idx) => {
+      const y = height - 2 - (p[key] / max) * (height - 6);
+      idx ? ctx.lineTo(idx * step, y) : ctx.moveTo(0, y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    if (fill) {
+      ctx.lineTo((history.length - 1) * step, height);
+      ctx.lineTo(0, height);
+      ctx.closePath();
+      ctx.fillStyle = color + '26';
+      ctx.fill();
+    }
+  };
+  draw('i', '#39c5cf', true);
+  draw('o', '#d29922', false);
+}
+
+let pendingCapture = 0;
+let barMax = 1;
+
+function renderCapture(capture) {
+  const on = capture.adapterUp && capture.engineRunning;
+  const pill = $('capturePill');
+  pill.className = 'pill' + (on ? ' on' : '');
+  $('capturePillText').textContent = on ? 'CAPTURING — all apps flow through braid' : 'OFF — proxy mode only';
+  const mark = (v) => (v ? '<span class="check">✓</span>' : '<span class="cross">—</span>');
+  $('captureStatus').innerHTML =
+    `<span>${mark(capture.staged)} <b>packet engine</b> ${capture.staged ? 'downloaded' : 'not downloaded yet (fetched on first enable)'}</span>` +
+    `<span>${mark(capture.engineRunning)} <b>engine process</b> ${capture.engineRunning ? 'running' : 'stopped'}</span>` +
+    `<span>${mark(capture.adapterUp)} <b>braid adapter</b> ${capture.adapterUp ? 'up' : 'not present'}</span>`;
+  const btn = $('captureBtn');
+  btn.disabled = false;
+  btn.className = on ? 'danger' : 'primary';
+  btn.textContent = on ? 'Disable system-wide capture' : 'Enable system-wide capture';
+  btn.onclick = async () => {
+    btn.disabled = true;
+    pendingCapture = Date.now();
+    $('captureMsg').textContent = 'Answer the UAC prompt (a console window will appear)…';
+    const result = await api(on ? '/api/capture/disable' : '/api/capture/enable');
+    if (!result.ok) {
+      $('captureMsg').textContent = result.error ?? 'failed';
+      pendingCapture = 0;
+    }
+  };
+  if (pendingCapture && (Date.now() - pendingCapture > 45000)) pendingCapture = 0;
+  if (pendingCapture) {
+    btn.disabled = true;
+  } else if (!btn.disabled) {
+    if ($('captureMsg').textContent.startsWith('Answer')) $('captureMsg').textContent = '';
+  }
+}
+
+let lastCaptureState = null;
+
+async function tick() {
+  let data;
+  try {
+    data = await (await fetch('/api/stats')).json();
+    $('status').className = '';
+  } catch {
+    $('status').className = 'offline';
+    $('status').textContent = 'braid is not responding';
+    return;
+  }
+
+  const links = data.links;
+  const up = links.filter((l) => l.up && l.enabled);
+  const minutes = Math.floor((Date.now() - data.startedAt) / 60000);
+  $('status').textContent = `v${data.version} · proxy ${data.proxy} · up ${minutes} min`;
+
+  // capture card (clear pending once the state actually flips)
+  const captureOn = data.capture.adapterUp && data.capture.engineRunning;
+  if (lastCaptureState !== null && captureOn !== lastCaptureState) { pendingCapture = 0; $('captureMsg').textContent = ''; }
+  lastCaptureState = captureOn;
+  renderCapture(data.capture);
+
+  // bonded totals
+  const down = links.reduce((n, l) => n + l.rateIn, 0);
+  const upRate = links.reduce((n, l) => n + l.rateOut, 0);
+  const active = links.reduce((n, l) => n + l.active, 0);
+  const udp = links.reduce((n, l) => n + l.udpFlows, 0);
+  $('totalDown').textContent = fmtRate(down).split(' ')[0];
+  $('totalDownUnit').textContent = `${fmtRate(down).split(' ')[1]} down · ${mbps(down)} Mbps`;
+  $('totalUp').textContent = `↑ ${fmtRate(upRate)} up · ${active} connections · ${udp} UDP flows · ${up.length}/${links.length} links up`;
+
+  barMax = Math.max(barMax * 0.985, ...links.map((l) => l.rateIn + l.rateOut), 51200);
+  $('bondRows').innerHTML = links.map((l) => `
+    <div class="bond-row ${l.up && l.enabled ? '' : 'dead'}">
+      <span class="name"><span class="dot" style="${l.enabled ? (l.up ? '' : 'background:var(--red);box-shadow:none') : 'background:var(--muted);box-shadow:none'}"></span>${esc(l.name)}</span>
+      <span class="bar"><i style="width:${Math.min(100, ((l.rateIn + l.rateOut) / barMax) * 100).toFixed(1)}%"></i></span>
+      <span class="rate">${mbps(l.rateIn + l.rateOut)} Mbps</span>
+    </div>`).join('');
+
+  // strategy segmented control
+  $('strategySeg').innerHTML = data.strategies.map((s) =>
+    `<button class="${s === data.strategy ? 'active' : ''}" data-strategy="${s}">${s}</button>`).join('');
+  $('strategySeg').querySelectorAll('button').forEach((b) => {
+    b.onclick = () => api('/api/strategy', { strategy: b.dataset.strategy }).then(tick);
+  });
+  $('strategyHint').textContent = STRATEGY_HINTS[data.strategy] ?? '';
+
+  // link cards
+  $('links').innerHTML = links.map((l, i) => `
+    <div class="link ${l.enabled ? (l.up ? '' : 'down') : 'disabled'}">
+      <h3><span class="dot"></span>${esc(l.name)}<span class="ip">${esc(l.address)}</span></h3>
+      <div class="meta">
+        <span>ping <b>${l.latency == null ? '—' : l.latency + ' ms'}</b></span>
+        <span>conns <b>${l.active}</b> / ${l.total}</span>
+        <span>udp <b>${l.udpFlows}</b></span>
+        <span>↓ <b>${fmtRate(l.rateIn)}</b> · ${fmtBytes(l.bytesIn)}</span>
+        <span>↑ <b>${fmtRate(l.rateOut)}</b> · ${fmtBytes(l.bytesOut)}</span>
+      </div>
+      <canvas id="spark-${i}"></canvas>
+      <div class="link-foot">
+        <div class="legend">
+          <span><i style="background:#39c5cf"></i>download</span>
+          <span><i style="background:#d29922"></i>upload</span>
+        </div>
+        <label class="switch" title="${l.enabled ? 'disable this link' : 'enable this link'}">
+          <input type="checkbox" data-link="${esc(l.name)}" ${l.enabled ? 'checked' : ''}>
+          <span></span>
+        </label>
+      </div>
+    </div>`).join('');
+  links.forEach((l, i) => sparkline($('spark-' + i), l.history));
+  $('links').querySelectorAll('input[data-link]').forEach((input) => {
+    input.onchange = () =>
+      api('/api/links/toggle', { name: input.dataset.link }).then((r) => {
+        if (!r.ok) { input.checked = !input.checked; alert(r.error); }
+        tick();
+      });
+  });
+
+  $('events').innerHTML = data.events.slice(0, 40).map((e) =>
+    `<li class="${e.kind}">${new Date(e.at).toLocaleTimeString()} — <b>${esc(e.message)}</b></li>`,
+  ).join('') || '<li>—</li>';
+}
+
+setInterval(tick, 1000);
+tick();
+</script>
+</body>
+</html>

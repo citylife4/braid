@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "braid",
+      "runtimeExecutable": "C:\\Users\\delfi\\AppData\\Local\\Programs\\node-v24.18.0-win-x64\\node.exe",
+      "runtimeArgs": ["bin/braid.js", "--verbose"],
+      "port": 8181
+    }
+  ]
+}

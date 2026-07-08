@@ -1,0 +1,14 @@
+{
+  "name": "braid",
+  "version": "2.0.0",
+  "description": "Bond multiple internet connections (Wi-Fi + Ethernet + hotspots) into one reliable connection with system-wide capture - a Speedify-style channel bonder.",
+  "type": "module",
+  "bin": { "braid": "bin/braid.js" },
+  "scripts": {
+    "start": "node bin/braid.js",
+    "list": "node bin/braid.js --list",
+    "test:udp": "node test/udp-test.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}
