@@ -1,4 +1,5 @@
 import net from 'node:net';
+import crypto from 'node:crypto';
 import {
   T, FrameParser, encodeHelloOk, encodeOpenOk, encodeOpenErr, encodePong,
   readStreamId, decodeHello, decodeOpen, decodeData, decodeSeq,
@@ -9,6 +10,13 @@ const LINGER_MS = 10000;
 const TUNNEL_IDLE_MS = 60000;
 
 const ERR_TO_CODE = { ECONNREFUSED: 5, ENETUNREACH: 3, EHOSTUNREACH: 4, ETIMEDOUT: 4, ENOTFOUND: 4, EAI_AGAIN: 4 };
+
+function secretMatches(given, expected) {
+  if (!expected) return true;
+  const got = Buffer.from(String(given ?? ''), 'utf8');
+  const want = Buffer.from(String(expected), 'utf8');
+  return got.length === want.length && crypto.timingSafeEqual(got, want);
+}
 
 // One client device = one tunnel = several subflows (one per physical link).
 // Frames for a stream may arrive on any subflow; the StreamEngine reassembles
@@ -177,7 +185,7 @@ export class TunnelServer {
           if (!tunnel) {
             if (type !== T.HELLO) throw new Error('expected HELLO');
             const { tunnelId, token } = decodeHello(body);
-            if (this.secret && token !== this.secret) {
+            if (!secretMatches(token, this.secret)) {
               this.log.warn('server: rejected subflow with bad secret');
               socket.destroy();
               return;

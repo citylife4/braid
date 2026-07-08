@@ -46,8 +46,9 @@ every app's TCP and UDP traffic flows through the bond automatically.
 - Needs admin: Windows shows a UAC prompt when you toggle it.
 - First enable downloads the packet engine (~4 MB): [tun2socks](https://github.com/xjasonlyu/tun2socks)
   v2.6.0 (GPL-3.0) + [Wintun](https://www.wintun.net) 0.14.1 (WireGuard project).
-  The download is pinned to exact versions and SHA-256 checked against GitHub's
-  published digest before it ever runs.
+  The downloads are pinned to exact versions and SHA-256 checked before anything
+  runs: tun2socks against GitHub's release-asset digest, Wintun against the
+  hash pinned in `engine\enable-capture.ps1`.
 - Kill-switch semantics: if braid stops while capture is on, the network drops
   rather than leaking around the bond. Toggle capture off (or run
   `engine\disable-capture.ps1` as admin) to restore normal routing.
@@ -144,6 +145,12 @@ never breaks.
 node bin/braid-server.js --port 7000 --secret "your-shared-secret"
 ```
 
+or:
+
+```bash
+BRAID_SECRET="your-shared-secret" node bin/braid-server.js --port 7000
+```
+
 **Point braid at it:**
 
 ```powershell
@@ -151,8 +158,10 @@ node bin/braid-server.js --port 7000 --secret "your-shared-secret"
 ```
 
 The GUI then shows a **TRUE BONDING** badge with live subflow and stream counts.
-Only `bin/braid-server.js` and `src/tunnel/` need to be on the server. Set a
-`--secret` so it isn't an open relay; put it behind your firewall's allowlist.
+Only `bin/braid-server.js` and `src/tunnel/` need to be on the server. The server
+refuses to start without a secret unless you pass `--allow-open-relay`; only use
+that opt-in mode on an isolated test network. In production, keep it behind your
+firewall's allowlist too.
 
 ## What braid can and cannot do (honesty section)
 
