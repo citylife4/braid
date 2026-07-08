@@ -44,15 +44,20 @@ function makeResolver(address) {
 }
 
 export class LinkManager extends EventEmitter {
-  constructor(defs, { checkInterval = 5000, checkTimeout = 3000, strategy = 'balanced' } = {}) {
+  constructor(defs, { checkInterval = 5000, checkTimeout = 3000, strategy = 'balanced', autoDiscover = false } = {}) {
     super();
     this.checkInterval = checkInterval;
     this.checkTimeout = checkTimeout;
     this.strategy = strategy;
+    this.autoDiscover = autoDiscover;
     this.startedAt = Date.now();
     this.events = [];
     this.timers = [];
-    this.links = defs.map((def, index) => ({
+    this.links = defs.map((def, index) => this.makeLink(def, index));
+  }
+
+  makeLink(def, index) {
+    return {
       index,
       name: def.name,
       address: def.address,
@@ -77,19 +82,22 @@ export class LinkManager extends EventEmitter {
       history: [],
       sockets: new Set(),
       resolver: makeResolver(def.address),
-    }));
+    };
   }
 
   start() {
     for (const link of this.links) {
-      const stagger = (this.checkInterval / this.links.length) * link.index;
-      this.timers.push(setTimeout(() => {
-        this.check(link);
-        this.timers.push(setInterval(() => this.check(link), this.checkInterval));
-      }, stagger));
+      this.startChecks(link, (this.checkInterval / this.links.length) * link.index);
     }
     this.timers.push(setInterval(() => this.tick(), 1000));
-    this.timers.push(setInterval(() => this.refreshAddresses(), 30000));
+    this.timers.push(setInterval(() => this.rescan(), 5000));
+  }
+
+  startChecks(link, stagger = 0) {
+    this.timers.push(setTimeout(() => {
+      this.check(link);
+      this.timers.push(setInterval(() => this.check(link), this.checkInterval));
+    }, stagger));
   }
 
   stop() {
@@ -227,14 +235,37 @@ export class LinkManager extends EventEmitter {
     }
   }
 
-  // DHCP can hand an interface a new address after it reconnects; follow it
-  // by interface name so the link keeps working without a restart.
-  refreshAddresses() {
+  // Hot-plug: adopt interfaces that connect after startup (Speedify-style),
+  // mark unplugged ones down immediately, and follow DHCP address changes.
+  rescan() {
     const current = discoverInterfaces();
+
+    if (this.autoDiscover) {
+      for (const iface of current) {
+        if (this.links.some((link) => link.name === iface.name)) continue;
+        const link = this.makeLink({ name: iface.name, address: iface.address }, this.links.length);
+        this.links.push(link);
+        this.record('up', `${link.name} connected — added to the bond`);
+        this.emit('added', link);
+        this.startChecks(link);
+      }
+    }
+
     for (const link of this.links) {
-      if (link.pinned) continue;
+      if (link.pinned) continue; // raw-IP links are managed by health checks alone
       const match = current.find((iface) => iface.name === link.name);
-      if (match && match.address !== link.address) {
+      if (!match) {
+        if (link.up) {
+          link.up = false;
+          link.failures = DOWN_AFTER_FAILURES;
+          link.latency = null;
+          this.record('down', `${link.name} is down (interface disconnected)`);
+          this.emit('down', link);
+          this.dropSockets(link, `link ${link.name} disconnected`);
+        }
+        continue;
+      }
+      if (match.address !== link.address) {
         this.record('info', `${link.name} address changed ${link.address} -> ${match.address}`);
         link.address = match.address;
         link.resolver = makeResolver(match.address);

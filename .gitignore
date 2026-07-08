@@ -1,0 +1,12 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Packet engine: downloaded + checksum-verified on demand by
+# engine/enable-capture.ps1, never checked in.
+engine/tun2socks.exe
+engine/wintun.dll
+
+# Capture engine runtime logs
+engine/capture.out.log
+engine/capture.err.log

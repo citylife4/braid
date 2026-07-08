@@ -135,6 +135,7 @@ const manager = new LinkManager(defs, {
   checkInterval: args.checkInterval * 1000,
   checkTimeout: args.checkTimeout * 1000,
   strategy: args.strategy,
+  autoDiscover: !args.links, // explicit --links means: bond exactly these
 });
 const pick = createPicker(manager);
 
@@ -147,6 +148,7 @@ const log = {
 
 manager.on('up', (link) => log.info(`${green('●')} ${link.name} (${link.address}) is ${green('back up')}`));
 manager.on('down', (link) => log.info(`${red('●')} ${link.name} (${link.address}) is ${red('DOWN')} — traffic shifted to remaining links`));
+manager.on('added', (link) => log.info(`${green('●')} ${link.name} (${link.address}) ${green('connected')} — added to the bond`));
 
 const capture = createCapture({ proxyPort: args.port, log });
 
