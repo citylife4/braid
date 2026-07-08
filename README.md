@@ -157,11 +157,19 @@ BRAID_SECRET="your-shared-secret" node bin/braid-server.js --port 7000
 .\braid.cmd --server your-vps.example.com:7000 --secret "your-shared-secret"
 ```
 
+`--server` is the relay address and TCP port, not the SSH login. For example,
+SSH may be `ubuntu@dev1.dvalverde.com`, but braid uses
+`--server dev1.dvalverde.com:7000`.
+
 The GUI then shows a **TRUE BONDING** badge with live subflow and stream counts.
 Only `bin/braid-server.js` and `src/tunnel/` need to be on the server. The server
 refuses to start without a secret unless you pass `--allow-open-relay`; only use
 that opt-in mode on an isolated test network. In production, keep it behind your
 firewall's allowlist too.
+
+Make sure the VPS actually accepts inbound TCP on the server port. On Ubuntu,
+that may mean `sudo ufw allow 7000/tcp` or an equivalent iptables/nftables rule;
+on cloud hosts, also add an ingress rule in the provider security list or NSG.
 
 ## What braid can and cannot do (honesty section)
 
