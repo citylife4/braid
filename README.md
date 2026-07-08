@@ -2,7 +2,8 @@
 
 Bond multiple internet connections — Wi-Fi, Ethernet, phone hotspots, USB modems —
 into one reliable connection, Speedify-style. Zero-dependency Node.js core, with a
-GUI, a virtual network adapter, and **system-wide capture for every Windows app**.
+GUI, a virtual network adapter, **system-wide capture for every Windows app**, and
+optional **true single-stream aggregation** through a bonding server on a VPS.
 
 ```
    every app ──> braid adapter (Wintun) ──> packet engine ──┐
@@ -19,7 +20,8 @@ GUI, a virtual network adapter, and **system-wide capture for every Windows app*
 ## Quick start
 
 ```powershell
-.\braid-gui.cmd          # starts braid + opens the control panel window
+.\braid-gui.vbs          # starts braid hidden (no console) + opens the control panel
+.\braid-gui.cmd          # same, but from a terminal window
 ```
 
 or headless:
@@ -29,6 +31,11 @@ or headless:
 .\braid.cmd                                 # bond everything (proxy :1080, GUI :8181)
 .\braid.cmd --links "Ethernet=3,Wi-Fi=1"    # explicit links with weights
 ```
+
+`braid-gui.vbs` is the "no shell" launcher: braid runs in the background with no
+console window, opens the control panel itself, and you stop it with the **Quit**
+button in the GUI. New interfaces (a Wi-Fi that connects late, a phone hotspot you
+plug in) join the bond automatically within a few seconds.
 
 ## Two ways to route apps through the bond
 
@@ -56,14 +63,18 @@ every app's TCP and UDP traffic flows through the bond automatically.
 
 ## The GUI
 
-`braid-gui.cmd` opens the control panel as an app window (Edge app mode). From it you can:
+`braid-gui.vbs` (hidden, no console) or `braid-gui.cmd` opens the control panel as
+an app window (Edge app mode). From it you can:
 
-- toggle **system-wide capture** (handles the UAC/elevation flow),
+- toggle **system-wide capture** (handles the UAC/elevation flow; the elevated
+  script runs hidden and reports success/failure back to the GUI),
 - watch per-link throughput, latency, connections and UDP flows live,
-- see the **bonded total** across all links,
+- see the **bonded total** across all links, and the **TRUE BONDING** badge with
+  live subflow/stream counts when `--server` is set,
 - switch strategy on the fly (`balanced` / `least-busy` / `failover`),
 - enable/disable individual links with a switch,
-- follow the event log (link up/down, failovers, address changes).
+- follow the event log (link up/down, hot-plug, failovers, address changes),
+- **Quit** braid (needed since the hidden launcher has no console to Ctrl+C).
 
 ## Options
 
@@ -73,6 +84,9 @@ every app's TCP and UDP traffic flows through the bond automatically.
 --dashboard <n>       GUI port, 0 disables                        (default 8181)
 --links <spec>        Links to bond: names or IPv4s, =weight
 --strategy <name>     balanced | least-busy | failover            (default balanced)
+--server <host:port>  Bond through a braid-server for true single-stream aggregation
+--secret <token>      Shared secret for --server
+--open                Open the control panel in a browser once ready
 --check-interval <s>  Seconds between health checks               (default 5)
 --check-timeout <s>   Health check timeout                        (default 3)
 --verbose             Log each proxied connection
@@ -105,16 +119,51 @@ Reliability comes from three layers:
 If DHCP hands an interface a new address after reconnect, braid follows it by
 interface name.
 
+## True single-stream bonding (braid-server)
+
+Without a server, aggregation is **per-connection**: many connections spread over
+links, but one download still rides one link. To make a *single* connection use
+every link at once — the summed-bandwidth trick Speedify markets — braid can bond
+through **braid-server**, a tiny relay you run on a VPS with a public IP.
+
+```
+  one download ─▶ braid ─┬─▶ Ethernet ─┐
+                         ├─▶ Wi-Fi ─────┼─▶  braid-server (VPS)  ─▶ the internet
+                         └─▶ hotspot ───┘        reassembles
+```
+
+braid splits each connection into 16 KB frames, sprays them across every link's
+own TCP subflow, and the server reassembles them in order (per-stream sequence
+numbers + cumulative ACKs + retransmit-on-any-surviving-link). If a link dies
+mid-download, its in-flight frames are resent over the others and the download
+never breaks.
+
+**Run the server** (on a VPS — needs Node 18+ and TCP port 7000 reachable):
+
+```bash
+node bin/braid-server.js --port 7000 --secret "your-shared-secret"
+```
+
+**Point braid at it:**
+
+```powershell
+.\braid.cmd --server your-vps.example.com:7000 --secret "your-shared-secret"
+```
+
+The GUI then shows a **TRUE BONDING** badge with live subflow and stream counts.
+Only `bin/braid-server.js` and `src/tunnel/` need to be on the server. Set a
+`--secret` so it isn't an open relay; put it behind your firewall's allowlist.
+
 ## What braid can and cannot do (honesty section)
 
-- **Aggregation is per-connection/per-flow.** Many parallel connections (browsers,
-  downloaders, torrents, most apps) spread across all links and their throughput
-  adds up — but a *single* TCP stream still rides one link. Splitting one stream
-  across links like Speedify does requires a bonding **server on the internet**
-  that reassembles packets. braid is server-less by design; a braid-server relay
-  would be the natural v3.
-- **Links must reach the internet independently** (different routers/ISPs or a
-  phone hotspot). Two links into the same router = failover only, shared upstream.
+- **Per-connection by default; per-stream with `--server`.** Out of the box, many
+  connections spread across links and their throughput adds up, but one stream
+  rides one link. Point `--server` at a braid-server and a *single* stream is
+  split across all links and reassembled — real summed bandwidth.
+- **Links must reach the internet independently for a real speed gain** (different
+  routers/ISPs, or a phone hotspot). Two links into the *same* router share one
+  upstream, so you get redundancy/failover but not more bandwidth — bonding can't
+  beat a shared bottleneck.
 - **IPv4 capture only.** IPv6 traffic bypasses the capture adapter (browsers fall
   back to IPv4 automatically for most sites). IPv6 targets over the proxy are
   refused cleanly.
@@ -124,18 +173,26 @@ interface name.
 ## Files
 
 ```
-bin/braid.js               CLI entry point
-braid-gui.cmd              GUI launcher (starts braid + opens the app window)
+bin/braid.js               CLI entry point (the client)
+bin/braid-server.js        the bonding relay (runs on a VPS)
+braid-gui.vbs              hidden GUI launcher (no console window)
+braid-gui.cmd              GUI launcher from a terminal
 braid.cmd                  headless launcher
-src/links.js               link discovery, health, DNS-per-link, stats
+src/links.js               link discovery, hot-plug, health, DNS-per-link, stats
 src/dispatch.js            strategies + multi-link dialing with retry
 src/proxy.js               SOCKS5 (TCP+UDP) / SOCKS4 / HTTP proxy engine
 src/udp.js                 SOCKS5 UDP ASSOCIATE relay (per-flow link pinning)
+src/open-browser.js        opens the control panel with no console flash
 src/capture.js             elevation launcher + capture status detection
 src/dashboard.js           control API + GUI server (127.0.0.1:8181)
 src/dashboard.html         the control panel
+src/tunnel/frame.js        bonding wire protocol (framing + codecs)
+src/tunnel/stream-engine.js  per-stream reliability, reordering, flow control
+src/tunnel/client.js       multipath client: subflow per link, stream mux
+src/tunnel/server.js       server: reassemble streams, dial targets
 engine/enable-capture.ps1  elevated: fetch engine, create adapter, own routes
 engine/disable-capture.ps1 elevated: stop engine, restore routing
 scripts/                   Windows system-proxy on/off helpers (proxy mode)
 test/udp-test.js           UDP ASSOCIATE smoke test
+test/tunnel-test.js        multipath bonding integrity test (in-process)
 ```

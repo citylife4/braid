@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const page = readFileSync(new URL('./dashboard.html', import.meta.url));
 
-export function createDashboard({ manager, capture, meta }) {
+export function createDashboard({ manager, capture, meta, onQuit }) {
   return http.createServer(async (req, res) => {
     const url = (req.url ?? '/').split('?')[0];
     const json = (code, body) => {
@@ -52,6 +52,11 @@ export function createDashboard({ manager, capture, meta }) {
         }
         if (url === '/api/capture/disable') {
           json(200, await capture.disable());
+          return;
+        }
+        if (url === '/api/quit') {
+          json(200, { ok: true });
+          setTimeout(() => onQuit?.(), 200); // let the response flush first
           return;
         }
       }

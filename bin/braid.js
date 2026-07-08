@@ -6,12 +6,14 @@ import { createPicker } from '../src/dispatch.js';
 import { createProxyServer } from '../src/proxy.js';
 import { createDashboard } from '../src/dashboard.js';
 import { createCapture } from '../src/capture.js';
+import { TunnelClient } from '../src/tunnel/client.js';
+import { openBrowser } from '../src/open-browser.js';
 
-const VERSION = '2.0.0';
+const VERSION = '3.0.0';
 
 const HELP = `braid v${VERSION} — bond multiple internet connections into one reliable connection
 
-Usage: node bin/braid.js [options]        (or braid-gui.cmd for the GUI)
+Usage: node bin/braid.js [options]        (or braid-gui.vbs for the GUI, no console)
 
 Options:
   --port <n>            Proxy port for SOCKS5/SOCKS4/HTTP clients    (default 1080)
@@ -21,11 +23,19 @@ Options:
                         name or IPv4 address, optional =weight,
                         e.g. --links "Ethernet=3,Wi-Fi=1"            (default: all)
   --strategy <name>     balanced | least-busy | failover             (default balanced)
+  --server <host:port>  Bond through a braid-server for TRUE single-stream
+                        aggregation (summed bandwidth on one connection)
+  --secret <token>      Shared secret for --server
+  --open                Open the control panel in a browser once ready
   --check-interval <s>  Seconds between link health checks           (default 5)
   --check-timeout <s>   Health check timeout in seconds              (default 3)
   --verbose             Log every proxied connection
   --list                Show detected interfaces and exit
   --help                Show this help
+
+Without --server, aggregation is per-connection (many connections spread over
+links). With --server pointed at a braid-server on a VPS, a single connection's
+bytes are split across every link and reassembled — Speedify-style bonding.
 
 System-wide capture (all Windows apps, no proxy settings needed) is toggled
 from the GUI, or manually: engine\\enable-capture.ps1 (needs admin/UAC).
@@ -52,6 +62,9 @@ function parseArgs(argv) {
     dashboard: 8181,
     links: null,
     strategy: 'balanced',
+    server: null,
+    secret: '',
+    open: false,
     checkInterval: 5,
     checkTimeout: 3,
     verbose: false,
@@ -72,6 +85,9 @@ function parseArgs(argv) {
       case '--dashboard': args.dashboard = Number(value()); break;
       case '--links': args.links = value(); break;
       case '--strategy': args.strategy = value(); break;
+      case '--server': args.server = value(); break;
+      case '--secret': args.secret = value(); break;
+      case '--open': args.open = true; break;
       case '--check-interval': args.checkInterval = Number(value()); break;
       case '--check-timeout': args.checkTimeout = Number(value()); break;
       case '--verbose': args.verbose = true; break;
@@ -89,7 +105,21 @@ function parseArgs(argv) {
   if (!Number.isInteger(args.dashboard) || args.dashboard < 0 || args.dashboard > 65535) fail('--dashboard must be 0-65535');
   if (!STRATEGIES.includes(args.strategy)) fail(`--strategy must be one of: ${STRATEGIES.join(', ')}`);
   if (!(args.checkInterval > 0) || !(args.checkTimeout > 0)) fail('check interval/timeout must be positive');
+  if (args.server) {
+    const parsed = parseServer(args.server);
+    if (!parsed) fail('--server must be host:port, e.g. --server vps.example.com:7000');
+    args.server = parsed;
+  }
   return args;
+}
+
+function parseServer(value) {
+  const at = value.lastIndexOf(':');
+  if (at === -1) return null;
+  const host = value.slice(0, at);
+  const port = Number(value.slice(at + 1));
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host, port };
 }
 
 function resolveLinks(spec) {
@@ -152,42 +182,67 @@ manager.on('added', (link) => log.info(`${green('●')} ${link.name} (${link.add
 
 const capture = createCapture({ proxyPort: args.port, log });
 
-const proxy = createProxyServer({ manager, pick, log, bindAddress: args.bind });
-proxy.on('error', (err) => fail(err.code === 'EADDRINUSE' ? `port ${args.port} is already in use` : err.message));
+let tunnel = null;
+if (args.server) {
+  tunnel = new TunnelClient(manager, { host: args.server.host, port: args.server.port, secret: args.secret, log });
+}
+
+const dashboardUrl = `http://127.0.0.1:${args.dashboard}`;
+
+const proxy = createProxyServer({ manager, pick, log, bindAddress: args.bind, tunnel });
+proxy.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    // Already running: if we were asked to open the GUI, just surface the
+    // existing instance instead of failing.
+    if (args.open && args.dashboard) {
+      openBrowser(dashboardUrl);
+      process.exit(0);
+    }
+    fail(`port ${args.port} is already in use`);
+  }
+  fail(err.message);
+});
 proxy.listen(args.port, args.bind, () => {
   console.log(bold(`\nbraid v${VERSION} — bonding ${defs.length} link${defs.length === 1 ? '' : 's'} (${manager.strategy})\n`));
   for (const link of manager.links) {
     console.log(`  ${green('●')} ${link.name.padEnd(28)} ${link.address.padEnd(16)} ${dim(`weight ${link.weight}`)}`);
   }
   console.log(`\n  Proxy      ${cyan(`${args.bind}:${args.port}`)}  ${dim('(SOCKS5 + UDP, SOCKS4/4a and HTTP on one port)')}`);
-  if (args.dashboard) console.log(`  GUI        ${cyan(`http://127.0.0.1:${args.dashboard}`)}  ${dim('(or run braid-gui.cmd)')}`);
+  if (tunnel) console.log(`  Bonding    ${cyan(`${args.server.host}:${args.server.port}`)}  ${dim('(true single-stream aggregation via braid-server)')}`);
+  if (args.dashboard) console.log(`  GUI        ${cyan(dashboardUrl)}  ${dim('(or run braid-gui.vbs)')}`);
   console.log(dim('\n  System-wide capture for all apps: use the GUI toggle (needs admin).'));
   console.log(dim('  Ctrl+C to stop.\n'));
   if (args.bind !== '127.0.0.1' && args.bind !== 'localhost') {
     log.warn('  warning: the proxy is exposed beyond localhost with no authentication —');
     log.warn('  anyone who can reach it can tunnel traffic through this machine.\n');
   }
+  if (args.open && args.dashboard) openBrowser(dashboardUrl);
 });
 
-manager.record('info', `braid started with ${defs.length} link(s), strategy "${args.strategy}"`);
+manager.record('info', `braid started with ${defs.length} link(s), strategy "${args.strategy}"${tunnel ? `, bonding via ${args.server.host}:${args.server.port}` : ''}`);
 manager.start();
+if (tunnel) tunnel.start();
+
+function shutdown() {
+  console.log('\nbraid stopped.');
+  process.exit(0);
+}
 
 if (args.dashboard) {
   const dashboard = createDashboard({
     manager,
     capture,
+    onQuit: shutdown,
     meta: () => ({
       version: VERSION,
       strategies: STRATEGIES,
       proxy: `${args.bind}:${args.port}`,
       proxyPort: args.port,
+      tunnel: tunnel ? tunnel.status() : { enabled: false },
     }),
   });
   dashboard.on('error', (err) => log.error(`dashboard: ${err.message}`));
   dashboard.listen(args.dashboard, '127.0.0.1');
 }
 
-process.on('SIGINT', () => {
-  console.log('\nbraid stopped.');
-  process.exit(0);
-});
+process.on('SIGINT', shutdown);

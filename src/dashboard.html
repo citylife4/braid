@@ -15,8 +15,15 @@
   header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
   h1 { font-size: 20px; font-weight: 650; }
   h1 small { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 10px; }
+  .head-right { display: flex; align-items: center; gap: 12px; }
   #status { color: var(--muted); font-size: 13px; }
   #status.offline { color: var(--red); }
+  button.ghost { padding: 5px 12px; font-size: 12.5px; font-weight: 500; color: var(--muted); background: transparent; }
+  button.ghost:hover { border-color: var(--red); color: var(--red); }
+  .tunnel-line { font-size: 12.5px; margin: 2px 0 12px; display: flex; align-items: center; gap: 8px; }
+  .tunnel-line .tag { font-weight: 600; color: #a371f7; background: rgba(163, 113, 247, .14); border-radius: 999px; padding: 2px 9px; font-size: 11px; letter-spacing: .03em; }
+  .tunnel-line.off .tag { color: var(--muted); background: #1a212f; }
+  .tunnel-line .detail { color: var(--muted); }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
   .hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; margin-bottom: 14px; }
   .card h2 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
@@ -88,7 +95,10 @@
 <body>
 <header>
   <h1>braid <small>every link, one connection</small></h1>
-  <div id="status">connecting…</div>
+  <div class="head-right">
+    <span id="status">connecting…</span>
+    <button id="quitBtn" class="ghost" title="Stop braid">Quit</button>
+  </div>
 </header>
 
 <div class="hero">
@@ -109,6 +119,7 @@
     <h2>Bonded connection</h2>
     <div class="total"><span class="big" id="totalDown">0</span><span class="unit" id="totalDownUnit">MB/s down · 0 Mbps</span></div>
     <div class="subtotal" id="totalUp">↑ 0 B/s up · 0 active connections</div>
+    <div class="tunnel-line" id="tunnelLine" style="display:none"></div>
     <div id="bondRows"></div>
   </div>
 </div>
@@ -200,7 +211,7 @@ function renderCapture(capture) {
   btn.onclick = async () => {
     btn.disabled = true;
     pendingCapture = Date.now();
-    $('captureMsg').textContent = 'Answer the UAC prompt (a console window will appear)…';
+    $('captureMsg').textContent = 'Answer the UAC prompt…';
     const result = await api(on ? '/api/capture/disable' : '/api/capture/enable');
     if (!result.ok) {
       $('captureMsg').textContent = result.error ?? 'failed';
@@ -211,7 +222,11 @@ function renderCapture(capture) {
   if (pendingCapture) {
     btn.disabled = true;
   } else if (!btn.disabled) {
-    if ($('captureMsg').textContent.startsWith('Answer')) $('captureMsg').textContent = '';
+    // Surface the last elevated-script outcome (it runs hidden, so this is
+    // the only place a failure would show).
+    const lr = capture.lastResult;
+    if (!on && lr && lr.ok === false) $('captureMsg').textContent = `last attempt failed: ${lr.message}`;
+    else if ($('captureMsg').textContent.startsWith('Answer')) $('captureMsg').textContent = '';
   }
 }
 
@@ -239,6 +254,17 @@ async function tick() {
   lastCaptureState = captureOn;
   renderCapture(data.capture);
 
+  $('quitBtn').onclick = async () => {
+    if (captureOn) {
+      alert('System-wide capture is ON. Disable it first (button above) — quitting braid now would drop your network (kill-switch).');
+      return;
+    }
+    if (!confirm('Stop braid? Apps pointed at the proxy will lose their connection.')) return;
+    await api('/api/quit');
+    document.body.innerHTML = '<p style="padding:48px;color:#8b98ab;font:15px system-ui">braid stopped. You can close this window.</p>';
+    clearInterval(window.__braidTimer);
+  };
+
   // bonded totals
   const down = links.reduce((n, l) => n + l.rateIn, 0);
   const upRate = links.reduce((n, l) => n + l.rateOut, 0);
@@ -247,6 +273,20 @@ async function tick() {
   $('totalDown').textContent = fmtRate(down).split(' ')[0];
   $('totalDownUnit').textContent = `${fmtRate(down).split(' ')[1]} down · ${mbps(down)} Mbps`;
   $('totalUp').textContent = `↑ ${fmtRate(upRate)} up · ${active} connections · ${udp} UDP flows · ${up.length}/${links.length} links up`;
+
+  // bonding-server (true single-stream aggregation) status
+  const t = data.tunnel;
+  const tl = $('tunnelLine');
+  if (t && t.enabled) {
+    tl.style.display = 'flex';
+    const healthy = t.subflows > 0;
+    tl.className = 'tunnel-line' + (healthy ? '' : ' off');
+    tl.innerHTML = `<span class="tag">TRUE BONDING</span><span class="detail">` +
+      `${healthy ? 'single streams split across links' : 'connecting…'} · via ${esc(t.server)} · ` +
+      `${t.subflows}/${t.total} subflows · ${t.streams} streams</span>`;
+  } else {
+    tl.style.display = 'none';
+  }
 
   barMax = Math.max(barMax * 0.985, ...links.map((l) => l.rateIn + l.rateOut), 51200);
   $('bondRows').innerHTML = links.map((l) => `
@@ -301,7 +341,7 @@ async function tick() {
   ).join('') || '<li>—</li>';
 }
 
-setInterval(tick, 1000);
+window.__braidTimer = setInterval(tick, 1000);
 tick();
 </script>
 </body>

@@ -52,10 +52,10 @@ async function socks5(client, reader, options) {
   if (!host) return refuse(0x08);
 
   try {
-    const { socket: remote, link } = await dialOut(options, host, port);
+    const { socket: remote, link, tracked } = await dialOut(options, host, port);
     const bound = boundAddress(remote);
     client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, ...bound.ip, ...bound.port]));
-    splice(client, reader, remote, link, `${host}:${port}`, options);
+    splice(client, reader, remote, link, `${host}:${port}`, options, { tracked });
   } catch (err) {
     refuse(socks5ErrorCode(err));
   }
@@ -108,9 +108,9 @@ async function socks4(client, reader, options) {
   if (command !== 0x01) return refuse();
 
   try {
-    const { socket: remote, link } = await dialOut(options, host, port);
+    const { socket: remote, link, tracked } = await dialOut(options, host, port);
     client.write(Buffer.from([0x00, 0x5a, ...head.subarray(2, 8)]));
-    splice(client, reader, remote, link, `${host}:${port}`, options);
+    splice(client, reader, remote, link, `${host}:${port}`, options, { tracked });
   } catch {
     refuse();
   }
@@ -126,9 +126,9 @@ async function httpProxy(client, reader, options) {
   if (method === 'CONNECT') {
     const [host, port = '443'] = splitHostPort(target);
     try {
-      const { socket: remote, link } = await dialOut(options, host, Number(port));
+      const { socket: remote, link, tracked } = await dialOut(options, host, Number(port));
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      splice(client, reader, remote, link, `${host}:${port}`, options);
+      splice(client, reader, remote, link, `${host}:${port}`, options, { tracked });
     } catch {
       client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
     }
@@ -153,9 +153,9 @@ async function httpProxy(client, reader, options) {
     ].join('\r\n');
     const port = Number(url.port || 80);
     try {
-      const { socket: remote, link } = await dialOut(options, url.hostname, port);
+      const { socket: remote, link, tracked } = await dialOut(options, url.hostname, port);
       remote.write(request);
-      splice(client, reader, remote, link, `${url.hostname}:${port}`, options, { extraBytesOut: request.length });
+      splice(client, reader, remote, link, `${url.hostname}:${port}`, options, { extraBytesOut: request.length, tracked });
     } catch {
       client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
     }
@@ -168,15 +168,22 @@ async function httpProxy(client, reader, options) {
   );
 }
 
-function dialOut(options, host, port) {
-  return dial(options, host, port, {
+async function dialOut(options, host, port) {
+  // Tunnel mode: one app stream is split across links by the bonding server,
+  // so a single connection gets the summed bandwidth. Direct mode: the whole
+  // connection rides one chosen link.
+  if (options.tunnel) return options.tunnel.open(host, port);
+  const result = await dial(options, host, port, {
     onRetry: (link, err) =>
       options.log.warn(`  retrying ${host}:${port} on another link after ${link.name} failed (${err.code})`),
   });
+  return { ...result, tracked: true };
 }
 
-// Wire the two sockets together and account traffic to the carrying link.
-function splice(client, reader, remote, link, description, options, { extraBytesOut = 0 } = {}) {
+// Wire the two sockets together. In direct mode we account per-link byte
+// counts here; in tunnel mode (tracked=false) the tunnel client already
+// counts bytes per subflow, so we must not double-count.
+function splice(client, reader, remote, link, description, options, { extraBytesOut = 0, tracked = true } = {}) {
   const leftover = reader.drain();
   reader.detach();
 
@@ -187,20 +194,22 @@ function splice(client, reader, remote, link, description, options, { extraBytes
   }
 
   const { manager, log } = options;
-  manager.track(link, remote);
+  if (tracked) manager.track(link, remote);
 
-  link.bytesOut += extraBytesOut;
+  if (tracked) link.bytesOut += extraBytesOut;
   if (leftover.length) {
-    link.bytesOut += leftover.length;
+    if (tracked) link.bytesOut += leftover.length;
     remote.write(leftover);
   }
 
-  client.on('data', (chunk) => {
-    link.bytesOut += chunk.length;
-  });
-  remote.on('data', (chunk) => {
-    link.bytesIn += chunk.length;
-  });
+  if (tracked) {
+    client.on('data', (chunk) => {
+      link.bytesOut += chunk.length;
+    });
+    remote.on('data', (chunk) => {
+      link.bytesIn += chunk.length;
+    });
+  }
 
   client.pipe(remote);
   remote.pipe(client);
@@ -213,10 +222,11 @@ function splice(client, reader, remote, link, description, options, { extraBytes
   client.on('close', teardown);
   remote.on('close', teardown);
 
+  const via = tracked ? link.name : 'bond';
   const startedAt = Date.now();
-  log.debug(`open  ${description} via ${link.name}`);
+  log.debug(`open  ${description} via ${via}`);
   remote.once('close', () => {
-    log.debug(`close ${description} via ${link.name} (${Date.now() - startedAt} ms)`);
+    log.debug(`close ${description} via ${via} (${Date.now() - startedAt} ms)`);
   });
 }
 

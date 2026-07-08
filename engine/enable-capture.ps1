@@ -9,10 +9,19 @@
 param(
     [int]$ProxyPort = 1080,
     [string]$AdapterName = 'braid',
-    [switch]$SkipChecksum
+    [switch]$SkipChecksum,
+    [switch]$Hidden
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Report outcome to the GUI (which polls engine\capture.result.json). When
+# launched hidden from the GUI there is no console to read, so we never block
+# on a keypress in that mode.
+function Write-Result($ok, $message) {
+    $obj = [ordered]@{ ok = $ok; message = "$message"; at = (Get-Date).ToString('o') }
+    ($obj | ConvertTo-Json -Compress) | Set-Content -Path (Join-Path $PSScriptRoot 'capture.result.json') -Encoding utf8
+}
 
 $TUN2SOCKS_VERSION = 'v2.6.0'
 $TUN2SOCKS_ZIP = 'tun2socks-windows-amd64.zip'
@@ -92,14 +101,16 @@ try {
     netsh interface ip add dnsservers name="$AdapterName" address=1.1.1.1 index=2 validate=no | Out-Null
     Set-NetIPInterface -InterfaceAlias $AdapterName -InterfaceMetric 1 -ErrorAction SilentlyContinue
 
+    Write-Result $true 'System-wide capture enabled.'
     Write-Host ''
     Write-Host 'System-wide capture ENABLED.' -ForegroundColor Green
     Write-Host 'All IPv4 traffic from every app now flows through braid.'
     Write-Host 'Note: if you stop braid while capture is on, the network drops (kill-switch) - run disable-capture.ps1 or use the GUI to restore.'
-    Start-Sleep -Seconds 3
+    if (-not $Hidden) { Start-Sleep -Seconds 3 }
 } catch {
+    Write-Result $false "$_"
     Write-Host ''
     Write-Host "FAILED: $_" -ForegroundColor Red
-    Read-Host 'Press Enter to close'
+    if (-not $Hidden) { Read-Host 'Press Enter to close' }
     exit 1
 }
