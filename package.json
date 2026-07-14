@@ -11,6 +11,7 @@
     "start": "node bin/braid.js",
     "server": "node bin/braid-server.js",
     "list": "node bin/braid.js --list",
+    "test": "node test/tunnel-test.js",
     "test:udp": "node test/udp-test.js",
     "test:tunnel": "node test/tunnel-test.js"
   },

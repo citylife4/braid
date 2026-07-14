@@ -31,6 +31,8 @@ function frame(type, body = Buffer.alloc(0)) {
 
 export function encodeHello(tunnelId, token = '') {
   const t = Buffer.from(token, 'utf8');
+  if (tunnelId.length !== 16) throw new Error('tunnel id must be 16 bytes');
+  if (t.length > 255) throw new Error('tunnel secret must be 255 bytes or less');
   const body = Buffer.allocUnsafe(17 + t.length);
   tunnelId.copy(body, 0);
   body.writeUInt8(t.length, 16);
@@ -41,6 +43,8 @@ export const encodeHelloOk = () => frame(T.HELLO_OK);
 
 export function encodeOpen(streamId, host, port) {
   const h = Buffer.from(host, 'utf8');
+  if (h.length > 255) throw new Error('tunnel host name must be 255 bytes or less');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('tunnel port must be 1-65535');
   const body = Buffer.allocUnsafe(7 + h.length);
   body.writeUInt32BE(streamId, 0);
   body.writeUInt16BE(port, 4);

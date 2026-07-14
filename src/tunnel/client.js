@@ -8,6 +8,7 @@ import {
 import { StreamEngine } from './stream-engine.js';
 
 const RECONNECT_MS = 2000;
+const CONNECT_TIMEOUT_MS = 8000;
 const PING_MS = 10000;
 const DEAD_MS = 25000;
 const LINGER_MS = 10000;
@@ -75,6 +76,7 @@ export class TunnelClient {
     this.nextId = 1;
     this.streamCount = 0;
     this.timer = null;
+    this.lastError = null;
   }
 
   start() {
@@ -102,11 +104,16 @@ export class TunnelClient {
     try {
       socket = net.connect({ host: this.host, port: this.port, localAddress: link.address, noDelay: true });
     } catch (err) {
+      this.lastError = `${link.name}: ${err.code ?? err.message}`;
       this.log.debug(`tunnel: subflow via ${link.name} failed to start: ${err.message}`);
       return;
     }
-    const sf = { socket, link, ready: false, parser: new FrameParser(), lastPong: Date.now(), lastPing: 0, reconnect: null };
+    const sf = { socket, link, ready: false, parser: new FrameParser(), lastPong: Date.now(), lastPing: 0, reconnect: null, lastError: null };
     this.subflows.set(link.name, sf);
+    socket.setTimeout(CONNECT_TIMEOUT_MS, () => {
+      sf.lastError = objErr(`connect to ${this.host}:${this.port} timed out`, 'ETIMEDOUT');
+      socket.destroy();
+    });
     socket.on('connect', () => socket.write(encodeHello(this.tunnelId, this.secret)));
     socket.on('data', (chunk) => {
       link.bytesIn += chunk.length;
@@ -118,7 +125,9 @@ export class TunnelClient {
       }
     });
     socket.on('drain', () => this.drainPending());
-    socket.on('error', () => {});
+    socket.on('error', (err) => {
+      sf.lastError = err;
+    });
     socket.on('close', () => this.onSubflowClose(sf));
   }
 
@@ -129,6 +138,9 @@ export class TunnelClient {
     if (wasReady) {
       this.log.warn(`tunnel: subflow via ${sf.link.name} dropped — retransmitting in-flight data`);
       for (const engine of this.engines.values()) engine.retransmitAll();
+    } else if (sf.lastError) {
+      this.lastError = `${sf.link.name}: ${sf.lastError.code ?? sf.lastError.message}`;
+      this.log.debug(`tunnel: subflow via ${sf.link.name} failed before ready (${sf.lastError.code ?? sf.lastError.message})`);
     }
     // Reconnect while the link is still considered up.
     sf.reconnect = setTimeout(() => {
@@ -146,7 +158,10 @@ export class TunnelClient {
     switch (type) {
       case T.HELLO_OK:
         sf.ready = true;
+        sf.lastError = null;
+        sf.socket.setTimeout(0);
         sf.lastPong = Date.now();
+        this.lastError = null;
         this.log.info(`tunnel: subflow up via ${sf.link.name} (${sf.link.address})`);
         this.resolveReady();
         this.drainPending();
@@ -309,6 +324,7 @@ export class TunnelClient {
       subflows: this.readyCount(),
       total: this.subflows.size,
       streams: this.streamCount,
+      lastError: this.lastError,
     };
   }
 }

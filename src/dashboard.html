@@ -281,8 +281,9 @@ async function tick() {
     tl.style.display = 'flex';
     const healthy = t.subflows > 0;
     tl.className = 'tunnel-line' + (healthy ? '' : ' off');
+    const tunnelStatus = healthy ? 'single streams split across links' : (t.lastError ? `connecting (${esc(t.lastError)})` : 'connecting…');
     tl.innerHTML = `<span class="tag">TRUE BONDING</span><span class="detail">` +
-      `${healthy ? 'single streams split across links' : 'connecting…'} · via ${esc(t.server)} · ` +
+      `${tunnelStatus} · via ${esc(t.server)} · ` +
       `${t.subflows}/${t.total} subflows · ${t.streams} streams</span>`;
   } else {
     tl.style.display = 'none';

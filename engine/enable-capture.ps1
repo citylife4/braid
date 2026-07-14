@@ -27,6 +27,7 @@ $TUN2SOCKS_VERSION = 'v2.6.0'
 $TUN2SOCKS_ZIP = 'tun2socks-windows-amd64.zip'
 $TUN2SOCKS_URL = "https://github.com/xjasonlyu/tun2socks/releases/download/$TUN2SOCKS_VERSION/$TUN2SOCKS_ZIP"
 $WINTUN_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip'
+$WINTUN_SHA256 = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
 
 $exe = Join-Path $PSScriptRoot 'tun2socks.exe'
 $dll = Join-Path $PSScriptRoot 'wintun.dll'
@@ -58,6 +59,11 @@ try {
 
         $wzip = Join-Path $tmp 'wintun.zip'
         curl.exe -sSL -o $wzip $WINTUN_URL
+        if (-not $SkipChecksum) {
+            $wactual = (Get-FileHash $wzip -Algorithm SHA256).Hash.ToLower()
+            if ($wactual -ne $WINTUN_SHA256) { throw "Wintun checksum mismatch! expected $WINTUN_SHA256, got $wactual - refusing to install." }
+            Write-Host "Wintun checksum OK ($wactual)"
+        }
         Expand-Archive -Path $wzip -DestinationPath $tmp -Force
         Copy-Item (Join-Path $tmp 'wintun\bin\amd64\wintun.dll') $dll -Force
         Write-Host 'Engine ready.'
