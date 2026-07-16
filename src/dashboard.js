@@ -2,18 +2,31 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 
 const page = readFileSync(new URL('./dashboard.html', import.meta.url));
+const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost)(?::\d+)?$/i;
+const SECURITY_HEADERS = {
+  'cache-control': 'no-store',
+  'content-security-policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; frame-ancestors 'none'; form-action 'none'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+};
 
 export function createDashboard({ manager, capture, meta, onQuit }) {
   return http.createServer(async (req, res) => {
     const url = (req.url ?? '/').split('?')[0];
     const json = (code, body) => {
-      res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.writeHead(code, { ...SECURITY_HEADERS, 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
 
     try {
+      const host = req.headers.host ?? '';
+      if (!LOOPBACK_HOST.test(host)) {
+        json(421, { ok: false, error: 'dashboard is available on localhost only' });
+        return;
+      }
       if (req.method === 'GET' && url === '/') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'text/html; charset=utf-8' });
         res.end(page);
         return;
       }
@@ -27,6 +40,10 @@ export function createDashboard({ manager, capture, meta, onQuit }) {
         // origins (random websites) from poking the control API.
         if (req.headers['x-braid'] !== '1') {
           json(403, { ok: false, error: 'missing x-braid header' });
+          return;
+        }
+        if (req.headers.origin && req.headers.origin !== `http://${host}`) {
+          json(403, { ok: false, error: 'origin is not allowed' });
           return;
         }
         let body = {};
@@ -55,6 +72,15 @@ export function createDashboard({ manager, capture, meta, onQuit }) {
           return;
         }
         if (url === '/api/quit') {
+          const captureState = capture.status();
+          const capturePresent = captureState.engineRunning || captureState.adapterUp;
+          if (capturePresent && captureState.ownership !== 'other') {
+            json(409, {
+              ok: false,
+              error: 'disable system-wide capture before quitting to avoid dropping the network',
+            });
+            return;
+          }
           json(200, { ok: true });
           setTimeout(() => onQuit?.(), 200); // let the response flush first
           return;

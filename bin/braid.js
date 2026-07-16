@@ -9,7 +9,7 @@ import { createCapture } from '../src/capture.js';
 import { TunnelClient } from '../src/tunnel/client.js';
 import { openBrowser } from '../src/open-browser.js';
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 
 const HELP = `braid v${VERSION} — bond multiple internet connections into one reliable connection
 
@@ -180,7 +180,7 @@ manager.on('up', (link) => log.info(`${green('●')} ${link.name} (${link.addres
 manager.on('down', (link) => log.info(`${red('●')} ${link.name} (${link.address}) is ${red('DOWN')} — traffic shifted to remaining links`));
 manager.on('added', (link) => log.info(`${green('●')} ${link.name} (${link.address}) ${green('connected')} — added to the bond`));
 
-const capture = createCapture({ proxyPort: args.port, log });
+const capture = createCapture({ proxyPort: args.port, dashboardPort: args.dashboard, log });
 
 let tunnel = null;
 if (args.server) {

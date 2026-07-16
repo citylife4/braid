@@ -1,19 +1,83 @@
 {
   "name": "braid",
-  "version": "3.0.0",
+  "productName": "Braid",
+  "version": "3.1.0",
   "description": "Bond multiple internet connections (Wi-Fi + Ethernet + hotspots) into one reliable connection with system-wide capture and true single-stream aggregation - a Speedify-style channel bonder.",
+  "author": "citylife4",
   "type": "module",
+  "main": "desktop/main.js",
   "bin": {
     "braid": "bin/braid.js",
     "braid-server": "bin/braid-server.js"
   },
   "scripts": {
     "start": "node bin/braid.js",
+    "desktop": "electron .",
+    "generate:icons": "node scripts/generate-icons.js",
+    "prepack:win": "npm run generate:icons",
+    "pack:win": "electron-builder --win dir --x64",
+    "prebuild:win": "npm run generate:icons",
+    "build:win": "electron-builder --win --x64",
     "server": "node bin/braid-server.js",
     "list": "node bin/braid.js --list",
+    "test": "node --test test/dashboard-test.js test/links-test.js",
     "test:udp": "node test/udp-test.js",
     "test:tunnel": "node test/tunnel-test.js"
   },
-  "engines": { "node": ">=18" },
-  "license": "MIT"
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.citylife4.braid",
+    "asar": true,
+    "asarUnpack": [
+      "package.json",
+      "bin/**/*",
+      "src/**/*",
+      "engine/*.ps1",
+      "scripts/*.ps1"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "bin/**/*",
+      "src/**/*",
+      "engine/*.ps1",
+      "scripts/*.ps1",
+      "package.json",
+      "README.md"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
 }

@@ -6,7 +6,7 @@
 import process from 'node:process';
 import { TunnelServer } from '../src/tunnel/server.js';
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 
 const HELP = `braid-server v${VERSION} — bonding relay for braid clients
 

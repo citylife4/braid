@@ -1,6 +1,9 @@
 # Node
 node_modules/
 npm-debug.log*
+dist/
+build/icon.ico
+build/icon.png
 
 # Packet engine: downloaded + checksum-verified on demand by
 # engine/enable-capture.ps1, never checked in.

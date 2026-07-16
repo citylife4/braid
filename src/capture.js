@@ -4,15 +4,31 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const engineDir = fileURLToPath(new URL('../engine/', import.meta.url));
+const scriptDir = fileURLToPath(new URL('../engine/', import.meta.url));
+const dataDir = path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'braid');
+const engineDir = path.join(dataDir, 'engine');
 const resultFile = path.join(engineDir, 'capture.result.json');
+const stateFile = path.join(dataDir, 'capture-state.json');
 const ADAPTER = 'braid';
 
-function readResult() {
+function readJson(file) {
   try {
-    return JSON.parse(readFileSync(resultFile, 'utf8'));
+    // Windows PowerShell 5 writes a UTF-8 BOM. JSON.parse does not accept it.
+    return JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
   } catch {
     return null;
+  }
+}
+
+function processIsRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // Access denied still proves the process exists; only ESRCH proves it does
+    // not. Stay conservative for every other platform-specific error.
+    return err.code === 'ESRCH' ? false : true;
   }
 }
 
@@ -20,7 +36,7 @@ function readResult() {
 // port. Both need Administrator rights, so braid (running unprivileged) only
 // *launches* the elevated scripts — Windows shows the user a UAC prompt and
 // the user stays in charge of the trust decision.
-export function createCapture({ proxyPort, log }) {
+export function createCapture({ proxyPort, dashboardPort = 0, log }) {
   let engineRunning = false;
   let lastProcessCheck = 0;
   let checking = false;
@@ -37,25 +53,45 @@ export function createCapture({ proxyPort, log }) {
 
   function status() {
     refreshProcess();
+    const adapterUp = Object.hasOwn(os.networkInterfaces(), ADAPTER);
+    const active = engineRunning && adapterUp;
+    const present = engineRunning || adapterUp;
+    const state = present ? readJson(stateFile) : null;
+    const ownerProxyPort = Number(state?.proxyPort) || null;
+    const ownerRunning = processIsRunning(Number(state?.braidPid));
+    const ownership = !present
+      ? 'none'
+      : ownerProxyPort === proxyPort
+        ? 'this'
+        : ownerProxyPort && ownerRunning === false
+          ? 'orphaned'
+          : ownerProxyPort
+            ? 'other'
+            : 'unknown';
     return {
       staged: existsSync(path.join(engineDir, 'tun2socks.exe')) && existsSync(path.join(engineDir, 'wintun.dll')),
       engineRunning,
-      adapterUp: Object.hasOwn(os.networkInterfaces(), ADAPTER),
-      lastResult: readResult(),
+      adapterUp,
+      active,
+      ownership,
+      ownerProxyPort,
+      ownerDashboardPort: Number(state?.dashboardPort) || null,
+      ownerRunning,
+      lastResult: readJson(resultFile),
     };
   }
 
   function runElevated(script, extraArgs = []) {
     return new Promise((resolve) => {
-      const file = path.join(engineDir, script);
+      const file = path.join(scriptDir, script);
       if (!existsSync(file)) {
         resolve({ ok: false, error: `${script} is missing` });
         return;
       }
       // Run the elevated script with a hidden window (-WindowStyle Hidden) and
-      // pass -Hidden so it reports via engine\capture.result.json instead of
-      // waiting on a keypress. The UAC prompt itself still shows — that's the
-      // user's trust gate — but no console window lingers afterward.
+      // pass -Hidden so it reports through the persistent ProgramData engine
+      // directory instead of waiting on a keypress. The UAC prompt itself
+      // still shows — that's the user's trust gate — but no console lingers.
       const inner = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', file, ...extraArgs, '-Hidden'];
       const list = inner.map((a) => `'${String(a).replace(/'/g, "''")}'`).join(',');
       const command = `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @(${list})`;
@@ -76,11 +112,16 @@ export function createCapture({ proxyPort, log }) {
     status,
     enable: () => {
       log.info('capture: launching elevated enable script (answer the UAC prompt)');
-      return runElevated('enable-capture.ps1', ['-ProxyPort', String(proxyPort)]);
+      return runElevated('enable-capture.ps1', [
+        '-DataDir', engineDir,
+        '-ProxyPort', String(proxyPort),
+        '-DashboardPort', String(dashboardPort),
+        '-BraidPid', String(process.pid),
+      ]);
     },
     disable: () => {
       log.info('capture: launching elevated disable script (answer the UAC prompt)');
-      return runElevated('disable-capture.ps1');
+      return runElevated('disable-capture.ps1', ['-DataDir', engineDir]);
     },
   };
 }

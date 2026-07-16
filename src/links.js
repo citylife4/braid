@@ -18,15 +18,39 @@ const HISTORY_LENGTH = 120;
 
 export const STRATEGIES = ['balanced', 'least-busy', 'failover'];
 
+// Binding public traffic to overlay and VM adapters does not create another
+// independent internet path. It instead produces a permanently failing link
+// (or, worse, a routing loop), so leave common virtual adapters out of the
+// automatic bond. Explicit raw-IP links remain available for advanced setups.
+const VIRTUAL_INTERFACE_NAMES = [
+  /^tailscale(?:$|\s|\d)/i,
+  /^zerotier/i,
+  /^vethernet\s*\(/i,
+  /^(?:wsl|docker|container|hyper-v)(?:$|\s)/i,
+  /^(?:vmware|virtualbox)\s/i,
+  /^(?:wireguard|nordlynx)(?:$|\s)/i,
+  /loopback/i,
+];
+
+export function isVirtualInterfaceName(name) {
+  return VIRTUAL_INTERFACE_NAMES.some((pattern) => pattern.test(name));
+}
+
 export function discoverInterfaces() {
   const found = [];
+  const names = new Set();
   for (const [name, addresses] of Object.entries(os.networkInterfaces())) {
     if (name === 'braid') continue; // never bond our own capture adapter
+    if (isVirtualInterfaceName(name)) continue;
     for (const addr of addresses ?? []) {
       if (addr.family !== 'IPv4' || addr.internal) continue;
       if (addr.address.startsWith('169.254.')) continue; // link-local: no internet
       if (addr.address.startsWith('192.168.123.')) continue; // capture adapter subnet
+      // Multiple addresses on one NIC still share one physical path and must
+      // not be counted as independent links.
+      if (names.has(name)) continue;
       found.push({ name, address: addr.address, mac: addr.mac });
+      names.add(name);
     }
   }
   return found;
