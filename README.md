@@ -19,9 +19,21 @@ optional **true single-stream aggregation** through a bonding server on a VPS.
 
 ## Quick start
 
-The packaged Windows app lives in the system tray. Run the installer or portable
-executable, then double-click the tray icon to open the dashboard. Its menu can
-start/stop Braid, open the dashboard, quit safely, and toggle **Start with Windows**.
+Download the latest Windows x64 build from the
+[GitHub Releases page](https://github.com/citylife4/braid/releases/latest). Each
+release includes an NSIS setup executable (recommended) and a portable executable.
+
+The packaged Windows app opens its dashboard in a standalone window and continues
+running in the system tray when that window is closed. Double-click the tray icon
+to reopen it. The tray menu can start/stop Braid, open the app, quit safely, and
+toggle **Start with Windows**. Startup launches stay hidden in the tray.
+
+Closing the window leaves Braid and system-wide capture running. Choosing
+**Stop Braid** or **Quit Braid** automatically disables capture first and waits
+for normal routing to return; approve the Windows administrator prompt when it
+appears. **Enable capture on launch** is on by default in the tray menu, so a
+new launch requests administrator approval and starts capture without requiring
+the dashboard button. The preference is remembered between launches.
 
 To build both `.exe` variants from source:
 
@@ -33,6 +45,10 @@ npm run build:win
 Artifacts are written to `dist\`: an NSIS setup executable (recommended for a
 stable install path) and a no-install portable executable. Local builds are not
 code-signed, so Windows SmartScreen may show an unknown-publisher warning.
+
+Pushing a version tag such as `v3.1.3` runs the Windows release workflow. The tag
+must match the version in `package.json`; GitHub runs the tests, builds both `.exe`
+variants, and attaches them to a public Release automatically.
 
 The source launchers remain available:
 
@@ -58,9 +74,11 @@ because they are not independent internet paths.
 
 ## Two ways to route apps through the bond
 
-**1. System-wide capture (all apps, zero app config)** — flip the toggle in the GUI.
-braid creates a virtual **braid** network adapter and takes over the default route;
-every app's TCP and UDP traffic flows through the bond automatically.
+**1. System-wide capture (all apps, zero app config)** — the packaged app enables
+this on launch by default after Windows approval; the behavior can be changed from
+the tray menu. Source launches can use the dashboard toggle. braid creates a virtual
+**braid** network adapter and takes over the default route; every app's TCP and UDP
+traffic flows through the bond automatically.
 
 - Needs admin: Windows shows a UAC prompt when you toggle it.
 - First enable downloads the packet engine (~4 MB): [tun2socks](https://github.com/xjasonlyu/tun2socks)
@@ -199,7 +217,9 @@ Only `bin/braid-server.js` and `src/tunnel/` need to be on the server. Set a
 ```
 bin/braid.js               CLI entry point (the client)
 bin/braid-server.js        the bonding relay (runs on a VPS)
-desktop/main.js            Windows tray host + login-startup controller
+desktop/main.js            Windows app window, tray host + login-startup controller
+desktop/capture-shutdown.js capture startup/shutdown ownership decisions
+.github/workflows/         tagged Windows build + GitHub Release automation
 braid-gui.vbs              hidden GUI launcher (no console window)
 braid-gui.cmd              GUI launcher from a terminal
 braid.cmd                  headless launcher
@@ -221,4 +241,7 @@ scripts/                   Windows system-proxy on/off helpers (proxy mode)
 scripts/generate-icons.js  reproducible Windows executable/tray icon generator
 test/udp-test.js           UDP ASSOCIATE smoke test
 test/tunnel-test.js        multipath bonding integrity test (in-process)
+test/dashboard-test.js     dashboard security + control API tests
+test/desktop-test.js       desktop capture lifecycle tests
+test/links-test.js         physical/virtual adapter discovery tests
 ```

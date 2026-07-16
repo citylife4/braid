@@ -9,7 +9,7 @@ import { createCapture } from '../src/capture.js';
 import { TunnelClient } from '../src/tunnel/client.js';
 import { openBrowser } from '../src/open-browser.js';
 
-const VERSION = '3.1.0';
+const VERSION = '3.1.3';
 
 const HELP = `braid v${VERSION} — bond multiple internet connections into one reliable connection
 

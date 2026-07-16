@@ -1,7 +1,7 @@
 {
   "name": "braid",
   "productName": "Braid",
-  "version": "3.1.0",
+  "version": "3.1.3",
   "description": "Bond multiple internet connections (Wi-Fi + Ethernet + hotspots) into one reliable connection with system-wide capture and true single-stream aggregation - a Speedify-style channel bonder.",
   "author": "citylife4",
   "type": "module",
@@ -20,7 +20,7 @@
     "build:win": "electron-builder --win --x64",
     "server": "node bin/braid-server.js",
     "list": "node bin/braid.js --list",
-    "test": "node --test test/dashboard-test.js test/links-test.js",
+    "test": "node --test test/dashboard-test.js test/desktop-test.js test/links-test.js",
     "test:udp": "node test/udp-test.js",
     "test:tunnel": "node test/tunnel-test.js"
   },
@@ -34,6 +34,14 @@
   },
   "build": {
     "appId": "com.citylife4.braid",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "citylife4",
+        "repo": "braid",
+        "releaseType": "release"
+      }
+    ],
     "asar": true,
     "asarUnpack": [
       "package.json",

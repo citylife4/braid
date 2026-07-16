@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { app, dialog, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from 'electron';
+import { captureShutdownAction, captureStartupAction } from './capture-shutdown.js';
 
 const APP_ID = 'com.citylife4.braid';
 const PROXY_PORT = Number(process.env.BRAID_PROXY_PORT ?? 1080);
@@ -10,14 +11,23 @@ const DASHBOARD_PORT = Number(process.env.BRAID_DASHBOARD_PORT ?? 8181);
 const DASHBOARD_URL = `http://127.0.0.1:${DASHBOARD_PORT}`;
 const SMOKE_TEST = process.env.BRAID_SMOKE_TEST === '1';
 const SMOKE_LOGIN_ITEM = process.env.BRAID_SMOKE_LOGIN_ITEM === '1';
+const SMOKE_WINDOW = process.env.BRAID_SMOKE_WINDOW === '1';
 const STARTUP_LAUNCH = process.argv.includes('--startup');
 const START_TIMEOUT = 30000;
 
 let tray = null;
+let dashboardWindow = null;
+let dashboardWindowReady = null;
 let logFile = null;
+let preferencesFile = null;
 let monitor = null;
 let allowQuit = false;
 let quitInProgress = false;
+let captureTransition = null;
+
+const preferences = {
+  autoCapture: true,
+};
 
 const service = {
   child: null,
@@ -28,13 +38,19 @@ const service = {
   lastError: null,
 };
 
+// Keep packaged smoke tests isolated from a real Braid instance that may be
+// protecting the machine's active capture session.
+if (SMOKE_TEST) app.setPath('userData', path.join(process.env.TEMP ?? process.cwd(), 'Braid Smoke Test'));
+
 app.setAppUserModelId(APP_ID);
 app.disableHardwareAcceleration();
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => { openDashboard(); });
+  app.on('second-instance', () => {
+    app.whenReady().then(() => { openDashboard(); });
+  });
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,6 +59,48 @@ async function writeLog(message) {
   if (!logFile) return;
   const line = `[${new Date().toISOString()}] ${message}\n`;
   try { await appendFile(logFile, line, 'utf8'); } catch {}
+}
+
+async function loadPreferences() {
+  preferencesFile = path.join(app.getPath('userData'), 'settings.json');
+  try {
+    const saved = JSON.parse(await readFile(preferencesFile, 'utf8'));
+    if (typeof saved.autoCapture === 'boolean') preferences.autoCapture = saved.autoCapture;
+  } catch (error) {
+    if (error.code !== 'ENOENT') await writeLog(`could not read settings: ${error.message}`);
+  }
+}
+
+async function savePreferences() {
+  if (!preferencesFile) return;
+  await mkdir(path.dirname(preferencesFile), { recursive: true });
+  await writeFile(preferencesFile, `${JSON.stringify(preferences, null, 2)}\n`, 'utf8');
+}
+
+async function reportAutomaticCaptureError(error) {
+  await writeLog(`automatic capture startup failed: ${error.stack ?? error.message}`);
+  if (SMOKE_TEST) return;
+  if (STARTUP_LAUNCH) {
+    showBalloon('System-wide capture is off', error.message, 'error');
+    return;
+  }
+  await dialog.showMessageBox({
+    type: 'warning',
+    title: 'System-wide capture did not start',
+    message: 'Braid is running in proxy-only mode.',
+    detail: error.message,
+  });
+}
+
+async function toggleAutomaticCapture(enabled) {
+  preferences.autoCapture = enabled;
+  try {
+    await savePreferences();
+    rebuildMenu();
+    if (enabled && isRunning()) await enableCaptureForStartup();
+  } catch (error) {
+    await reportAutomaticCaptureError(error);
+  }
 }
 
 async function request(pathname, options = {}, timeout = 1800) {
@@ -84,6 +142,72 @@ function createTrayImage() {
   // tiny PNG embedded also makes portable builds independent of working paths.
   const png = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA30lEQVR4nNXVsRHCMBBEUbdARgf0QUBEBZRGOw6JqcdEnjHynbx7uxoGz1wE+D8jCabpn67T+bIg87OwHVINWyCV0PX13k0J4QhHEDi+lathChHd2BGGl0MNSADnE2b36p4MdW2R/ZIClJ1t+X2onO37c/maYYB22rACoQBH4QoEArBhBpIC1CiKkQCOz5QAyl6RAOwRswFu82M3VUgKiBBRWIF04y0AibOQ9n3df0QW0INEr4dxBwAFpoAVwTwVC+jG14tZV2ageLscLggVryAyCPy1OyHQZhsJsYdHXh9nqY8cORCdHQAAAABJRU5ErkJggg==';
   return nativeImage.createFromDataURL(`data:image/png;base64,${png}`).resize({ width: 16, height: 16, quality: 'best' });
+}
+
+function destroyDashboardWindow() {
+  if (dashboardWindow && !dashboardWindow.isDestroyed()) dashboardWindow.destroy();
+  dashboardWindow = null;
+  dashboardWindowReady = null;
+}
+
+function createDashboardWindow() {
+  const window = new BrowserWindow({
+    title: 'Braid',
+    width: 1100,
+    height: 760,
+    minWidth: 680,
+    minHeight: 520,
+    show: false,
+    center: true,
+    autoHideMenuBar: true,
+    backgroundColor: '#0d1117',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      devTools: !app.isPackaged,
+    },
+  });
+
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('will-navigate', (event, url) => {
+    if (url !== `${DASHBOARD_URL}/`) event.preventDefault();
+  });
+  window.on('close', (event) => {
+    if (!allowQuit) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
+  window.on('closed', () => {
+    if (dashboardWindow === window) {
+      dashboardWindow = null;
+      dashboardWindowReady = null;
+    }
+  });
+  return window;
+}
+
+async function showDashboardWindow({ show = true } = {}) {
+  if (!isRunning()) await startService();
+  if (!dashboardWindow || dashboardWindow.isDestroyed()) {
+    dashboardWindow = createDashboardWindow();
+    const window = dashboardWindow;
+    dashboardWindowReady = window.loadURL(`${DASHBOARD_URL}/`).catch((error) => {
+      if (!window.isDestroyed()) window.destroy();
+      throw error;
+    });
+  }
+  await dashboardWindowReady;
+  const window = dashboardWindow;
+  if (!window || window.isDestroyed()) throw new Error('The Braid window closed before it was ready.');
+  if (show) {
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  }
+  return window;
 }
 
 function loginItemOptions(openAtLogin) {
@@ -147,7 +271,7 @@ function rebuildMenu() {
   const running = isRunning();
   const menu = Menu.buildFromTemplate([
     { label: service.transition ? 'Changing state…' : running ? 'Braid is running' : 'Braid is stopped', enabled: false },
-    { label: 'Open dashboard', enabled: running && !service.transition, click: () => { openDashboard(); } },
+    { label: 'Open Braid', enabled: !service.transition, click: () => { openDashboard(); } },
     { type: 'separator' },
     { label: 'Start Braid', enabled: !running && !service.transition, click: () => { startService({ notify: true }).catch(() => {}); } },
     { label: 'Stop Braid', enabled: running && !service.transition, click: () => { stopFromMenu(); } },
@@ -157,6 +281,12 @@ function rebuildMenu() {
       type: 'checkbox',
       checked: startsWithWindows(),
       click: (item) => toggleStartsWithWindows(item.checked),
+    },
+    {
+      label: 'Enable capture on launch',
+      type: 'checkbox',
+      checked: preferences.autoCapture,
+      click: (item) => { toggleAutomaticCapture(item.checked); },
     },
     { type: 'separator' },
     { label: 'Quit Braid', click: () => { quitApplication(); } },
@@ -233,6 +363,7 @@ async function startService({ notify = false } = {}) {
         writeLog(service.lastError);
         showBalloon('Braid stopped', service.lastError, 'error');
       }
+      destroyDashboardWindow();
       updateTray();
     });
 
@@ -274,17 +405,111 @@ async function waitForStop() {
   throw new Error('Braid did not stop cleanly.');
 }
 
+async function waitForCaptureDisabled(startedAt) {
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    const stats = await getStats();
+    if (!stats) throw new Error('The Braid service stopped before capture cleanup finished.');
+    const capture = stats.capture;
+    if (captureShutdownAction(capture) === 'none') return;
+    const resultAt = Date.parse(capture?.lastResult?.at ?? '');
+    if (capture?.lastResult?.ok === false && Number.isFinite(resultAt) && resultAt >= startedAt - 1000) {
+      throw new Error(capture.lastResult.message ?? 'Windows could not disable system-wide capture.');
+    }
+    await delay(500);
+  }
+  throw new Error('Timed out while waiting for Windows to restore normal routing.');
+}
+
+async function waitForCaptureEnabled(startedAt) {
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    const stats = await getStats();
+    if (!stats) throw new Error('The Braid service stopped before capture startup finished.');
+    const capture = stats.capture;
+    if (capture?.active && capture.ownership === 'this') return capture;
+    const resultAt = Date.parse(capture?.lastResult?.at ?? '');
+    if (capture?.lastResult?.ok === false && Number.isFinite(resultAt) && resultAt >= startedAt - 1000) {
+      throw new Error(capture.lastResult.message ?? 'Windows could not start system-wide capture.');
+    }
+    if (capture?.ownership === 'other') {
+      throw new Error(`Capture became managed by another Braid proxy on port ${capture.ownerProxyPort}.`);
+    }
+    await delay(500);
+  }
+  throw new Error('Timed out while waiting for the Braid network adapter to start.');
+}
+
+async function enableCaptureForStartupNow() {
+  const stats = await getStats();
+  if (!stats?.capture) throw new Error('The Braid service is not ready.');
+  const action = captureStartupAction(stats.capture);
+  if (action === 'ready') return stats.capture;
+  if (action === 'leave') {
+    await writeLog(`capture startup skipped because proxy port ${stats.capture.ownerProxyPort} owns it`);
+    return stats.capture;
+  }
+  if (action === 'manual') {
+    throw new Error('An incomplete or unverified capture session needs cleanup in the dashboard.');
+  }
+
+  showBalloon('Braid needs approval', 'Approve the Windows prompt to enable system-wide capture.');
+  await writeLog('automatically enabling system-wide capture on launch');
+  const startedAt = Date.now();
+  const result = await request('/api/capture/enable', { method: 'POST', body: '{}' }, 60000);
+  if (!result?.ok) throw new Error(result?.error ?? 'Windows did not approve capture startup.');
+  const capture = await waitForCaptureEnabled(startedAt);
+  await writeLog('system-wide capture started automatically');
+  showBalloon('System-wide capture is on', 'Windows apps are now routed through Braid.');
+  return capture;
+}
+
+async function enableCaptureForStartup() {
+  if (captureTransition) return captureTransition;
+  captureTransition = enableCaptureForStartupNow();
+  try {
+    return await captureTransition;
+  } finally {
+    captureTransition = null;
+  }
+}
+
+async function disableCaptureForShutdown() {
+  if (captureTransition) {
+    await writeLog('waiting for capture startup to finish before shutdown');
+    try { await captureTransition; } catch {}
+  }
+  const stats = await getStats();
+  if (!stats?.capture) return;
+  const action = captureShutdownAction(stats.capture);
+  if (action === 'none' || action === 'leave') return;
+  if (action === 'manual') {
+    throw new Error('Capture ownership could not be verified. Use the dashboard to clean it up before quitting.');
+  }
+
+  showBalloon('Braid needs approval', 'Approve the Windows prompt to restore normal routing before Braid stops.');
+  await writeLog(`automatically disabling ${stats.capture.ownership} capture before shutdown`);
+  const startedAt = Date.now();
+  const result = await request('/api/capture/disable', { method: 'POST', body: '{}' }, 60000);
+  if (!result?.ok) throw new Error(result?.error ?? 'Windows did not approve capture shutdown.');
+  await waitForCaptureDisabled(startedAt);
+  await writeLog('capture disabled automatically; normal routing restored');
+}
+
 async function stopService() {
-  if (service.transition || !isRunning()) return;
+  if (service.transition) throw new Error('Braid is already changing state. Please wait and try again.');
+  if (!isRunning()) return;
   service.transition = true;
   service.stopping = true;
   updateTray();
   try {
+    await disableCaptureForShutdown();
     await request('/api/quit', { method: 'POST', body: '{}' }, 5000);
     await waitForStop();
     service.child = null;
     service.mode = 'stopped';
     service.lastError = null;
+    destroyDashboardWindow();
     await writeLog('service stopped cleanly');
   } catch (error) {
     service.stopping = false;
@@ -299,8 +524,7 @@ async function stopService() {
 
 async function openDashboard() {
   try {
-    if (!isRunning()) await startService();
-    await shell.openExternal(`${DASHBOARD_URL}/`);
+    await showDashboardWindow();
   } catch (error) {
     if (!SMOKE_TEST) dialog.showErrorBox('Braid could not start', error.message);
   }
@@ -331,8 +555,8 @@ async function quitApplication() {
     quitInProgress = false;
     dialog.showMessageBox({
       type: 'warning',
-      title: 'Braid is still running',
-      message: 'Disable system-wide capture before quitting.',
+      title: 'Braid could not quit safely',
+      message: 'Braid is still running so your network connection remains protected.',
       detail: error.message,
     });
   }
@@ -342,6 +566,22 @@ async function runSmokeTest(image) {
   try {
     const stats = await startService();
     if (image.isEmpty()) throw new Error('tray icon is empty');
+    let windowUrl = null;
+    let windowTitle = null;
+    if (SMOKE_WINDOW) {
+      const window = await showDashboardWindow({ show: false });
+      windowUrl = window.webContents.getURL();
+      windowTitle = window.webContents.getTitle();
+      if (windowUrl !== `${DASHBOARD_URL}/`) throw new Error(`standalone window loaded an unexpected URL: ${windowUrl}`);
+      if (!/braid/i.test(windowTitle)) throw new Error(`standalone window has an unexpected title: ${windowTitle}`);
+      window.close();
+      await delay(50);
+      if (window.isDestroyed()) throw new Error('closing the dashboard window did not preserve the tray app');
+      if (window.isVisible()) throw new Error('closing the dashboard window did not hide it');
+      if (await showDashboardWindow({ show: false }) !== window) throw new Error('the tray app did not reuse its dashboard window');
+      destroyDashboardWindow();
+      await writeLog('standalone dashboard window and close-to-tray smoke test passed');
+    }
     let loginItemRoundTrip = null;
     if (SMOKE_LOGIN_ITEM) {
       const previous = startsWithWindows();
@@ -365,6 +605,9 @@ async function runSmokeTest(image) {
       links: stats.links.length,
       proxy: stats.proxy,
       dashboard: DASHBOARD_PORT,
+      windowUrl,
+      windowTitle,
+      autoCaptureOnLaunch: preferences.autoCapture,
       loginItemRoundTrip,
     })}\n`);
     await stopService();
@@ -387,11 +630,13 @@ app.on('before-quit', (event) => {
 app.on('window-all-closed', () => {});
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
   app.setAppLogsPath();
   const logs = app.getPath('logs');
   await mkdir(logs, { recursive: true });
   logFile = path.join(logs, 'braid-service.log');
   await writeLog(`desktop host starting${SMOKE_TEST ? ' (smoke test)' : ''}`);
+  await loadPreferences();
 
   const image = createTrayImage();
   if (image.isEmpty()) throw new Error('could not create the tray icon');
@@ -406,7 +651,10 @@ app.whenReady().then(async () => {
 
   try {
     await startService();
-    if (!STARTUP_LAUNCH) await shell.openExternal(`${DASHBOARD_URL}/`);
+    if (!STARTUP_LAUNCH) await showDashboardWindow();
+    if (!SMOKE_TEST && preferences.autoCapture) {
+      try { await enableCaptureForStartup(); } catch (error) { await reportAutomaticCaptureError(error); }
+    }
   } catch (error) {
     await writeLog(`initial start failed: ${error.stack ?? error.message}`);
     dialog.showErrorBox('Braid could not start', `${error.message}\n\nSee ${logFile} for details.`);
@@ -418,6 +666,7 @@ app.whenReady().then(async () => {
     if (!stats && service.mode === 'attached') {
       service.mode = 'stopped';
       service.lastError = 'The attached Braid service stopped.';
+      destroyDashboardWindow();
       updateTray();
     }
   }, 5000);
