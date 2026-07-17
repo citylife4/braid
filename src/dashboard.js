@@ -63,6 +63,11 @@ export function createDashboard({ manager, capture, meta, onQuit }) {
           json(result.ok ? 200 : 400, result);
           return;
         }
+        if (url === '/api/links/weight') {
+          const result = manager.setWeight(body.name, body.weight);
+          json(result.ok ? 200 : 400, result);
+          return;
+        }
         if (url === '/api/capture/enable') {
           json(200, await capture.enable());
           return;

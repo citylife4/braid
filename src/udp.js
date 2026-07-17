@@ -16,7 +16,6 @@ export function startUdpAssociation({ control, clientIp, bindAddress, link, mana
     let ready = false;
     let closed = false;
     let idleTimer = null;
-    const dnsCache = new Map();
 
     const teardown = (reason) => {
       if (closed) return;
@@ -50,16 +49,9 @@ export function startUdpAssociation({ control, clientIp, bindAddress, link, mana
         send(host, port, data);
         return;
       }
-      const cached = dnsCache.get(host);
-      if (cached) {
-        send(cached, port, data);
-        return;
-      }
+      // manager.resolveHost caches, so repeated datagrams to one name are cheap.
       manager.resolveHost(host)
-        .then((address) => {
-          dnsCache.set(host, address);
-          send(address, port, data);
-        })
+        .then((address) => send(address, port, data))
         .catch(() => log.debug(`udp   dropped datagram for unresolvable ${host}`));
     });
 

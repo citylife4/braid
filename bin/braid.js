@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import net from 'node:net';
 import process from 'node:process';
+import { readFileSync } from 'node:fs';
 import { discoverInterfaces, LinkManager, STRATEGIES } from '../src/links.js';
 import { createPicker } from '../src/dispatch.js';
 import { createProxyServer } from '../src/proxy.js';
@@ -9,7 +10,7 @@ import { createCapture } from '../src/capture.js';
 import { TunnelClient } from '../src/tunnel/client.js';
 import { openBrowser } from '../src/open-browser.js';
 
-const VERSION = '3.1.3';
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const HELP = `braid v${VERSION} — bond multiple internet connections into one reliable connection
 

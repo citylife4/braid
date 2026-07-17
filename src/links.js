@@ -15,6 +15,10 @@ const CHECK_TARGETS = [
 const DNS_SERVERS = ['1.1.1.1', '8.8.8.8'];
 const DOWN_AFTER_FAILURES = 2;
 const HISTORY_LENGTH = 120;
+const DNS_CACHE_TTL = 30000;
+const DNS_CACHE_MAX = 512;
+export const WEIGHT_MIN = 1;
+export const WEIGHT_MAX = 100;
 
 export const STRATEGIES = ['balanced', 'least-busy', 'failover'];
 
@@ -77,6 +81,7 @@ export class LinkManager extends EventEmitter {
     this.startedAt = Date.now();
     this.events = [];
     this.timers = [];
+    this.dnsCache = new Map(); // host -> { address, expires }
     this.links = defs.map((def, index) => this.makeLink(def, index));
   }
 
@@ -221,6 +226,20 @@ export class LinkManager extends EventEmitter {
     return { ok: true, strategy };
   }
 
+  setWeight(name, weight) {
+    const link = this.links.find((l) => l.name === name);
+    if (!link) return { ok: false, error: `no such link "${name}"` };
+    const value = Number(weight);
+    if (!Number.isFinite(value) || value < WEIGHT_MIN || value > WEIGHT_MAX) {
+      return { ok: false, error: `weight must be a number between ${WEIGHT_MIN} and ${WEIGHT_MAX}` };
+    }
+    if (value !== link.weight) {
+      link.weight = value;
+      this.record('info', `${link.name} weight set to ${value}`);
+    }
+    return { ok: true, name: link.name, weight: link.weight };
+  }
+
   toggleLink(name) {
     const link = this.links.find((l) => l.name === name);
     if (!link) return { ok: false, error: `no such link "${name}"` };
@@ -235,7 +254,20 @@ export class LinkManager extends EventEmitter {
 
   // Resolve through a healthy link's own resolver (bound to that interface),
   // falling back to the system resolver for hosts-file / intranet names.
+  // Successful answers are cached briefly so a burst of connections to the
+  // same host (a page load, a download manager) resolves once, not N times.
   async resolveHost(host) {
+    const cached = this.dnsCache.get(host);
+    if (cached && cached.expires > Date.now()) return cached.address;
+    const address = await this.lookupHost(host);
+    if (this.dnsCache.size >= DNS_CACHE_MAX) {
+      this.dnsCache.delete(this.dnsCache.keys().next().value); // oldest entry
+    }
+    this.dnsCache.set(host, { address, expires: Date.now() + DNS_CACHE_TTL });
+    return address;
+  }
+
+  async lookupHost(host) {
     for (const link of this.links) {
       if (!link.up || !link.enabled) continue;
       try {

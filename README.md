@@ -115,6 +115,8 @@ an app window (Edge app mode). From it you can:
   live subflow/stream counts when `--server` is set,
 - switch strategy on the fly (`balanced` / `least-busy` / `failover`),
 - enable/disable individual links with a switch,
+- adjust each link's **weight** (its share of new connections in balanced
+  rotation) without restarting,
 - follow the event log (link up/down, hot-plug, failovers, address changes),
 - **Quit** braid (needed since the hidden launcher has no console to Ctrl+C).
 

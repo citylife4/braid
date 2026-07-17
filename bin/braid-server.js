@@ -4,9 +4,10 @@
 // stream from frames arriving across all links and forwards to the target,
 // giving a *single* connection the summed bandwidth of every link.
 import process from 'node:process';
+import { readFileSync } from 'node:fs';
 import { TunnelServer } from '../src/tunnel/server.js';
 
-const VERSION = '3.1.3';
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const HELP = `braid-server v${VERSION} — bonding relay for braid clients
 

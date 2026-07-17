@@ -262,13 +262,18 @@ function socks5ErrorCode(err) {
     case 'ENETDOWN':
     case 'ENOLINK':
       return 0x03; // network unreachable
+    case 'EAFNOSUPPORT':
+      return 0x08; // address type not supported
     default:
       return 0x01;
   }
 }
 
 function splitHostPort(value) {
+  const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(value); // [::1]:443
+  if (bracketed) return [bracketed[1], bracketed[2]];
   const at = value.lastIndexOf(':');
-  if (at === -1) return [value, undefined];
+  // A second colon means a bare IPv6 literal with no port — keep it whole.
+  if (at === -1 || value.indexOf(':') !== at) return [value, undefined];
   return [value.slice(0, at), value.slice(at + 1)];
 }
