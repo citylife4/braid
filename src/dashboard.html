@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Braid — Control Panel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3c6 0 6 10 12 10' stroke='%2342cbd5' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3Cpath d='M2 13C8 13 8 3 14 3' stroke='%234c9aff' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
     color-scheme: dark;
@@ -56,9 +57,9 @@
   .total .big { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .total .unit { color: var(--muted); font-size: 13px; }
   .subtotal { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; font-variant-numeric: tabular-nums; }
-  .bond-row { display: grid; grid-template-columns: 130px 1fr 90px; align-items: center; gap: 10px; padding: 5px 0; font-size: 13px; }
+  .bond-row { display: grid; grid-template-columns: 130px 1fr 64px 90px; align-items: center; gap: 10px; padding: 5px 0; font-size: 13px; }
   .bond-row .name { display: flex; align-items: center; gap: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .bond-row .rate { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .bond-row .ping, .bond-row .rate { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
   .bar { height: 8px; border-radius: 4px; background: #1a212f; overflow: hidden; }
   .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width .5s; }
   .bond-row.dead .bar i { background: var(--red); }
@@ -85,6 +86,9 @@
   .link-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
   .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); }
   .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  .weight { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .weight b { color: var(--text); min-width: 20px; text-align: center; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .weight button { padding: 0 9px; font-size: 14px; line-height: 20px; border-radius: 6px; font-weight: 500; }
   .switch { position: relative; width: 36px; height: 20px; flex: none; cursor: pointer; }
   .switch input { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
   .switch input:disabled { cursor: wait; }
@@ -116,6 +120,7 @@
     .seg { width: 100%; }
     .seg button { flex: 1; padding-inline: 8px; }
     .bond-row { grid-template-columns: minmax(80px, 110px) minmax(40px, 1fr) 72px; gap: 7px; }
+    .bond-row .ping { display: none; }
     .link h3 { align-items: flex-start; flex-wrap: wrap; }
     .link h3 .ip { width: 100%; margin: -3px 0 0 18px; }
     .meta { gap: 8px 12px; }
@@ -155,6 +160,7 @@
     <h2>Bonded connection</h2>
     <div class="total"><span class="big" id="totalDown">0</span><span class="unit" id="totalDownUnit">MB/s down · 0 Mbps</span></div>
     <div class="subtotal" id="totalUp">↑ 0 B/s up · 0 active connections</div>
+    <div class="subtotal" id="totalSession">session total ↓ 0 B · ↑ 0 B</div>
     <div class="tunnel-line" id="tunnelLine" style="display:none"></div>
     <div id="bondRows"></div>
   </div>
@@ -393,10 +399,13 @@ function renderTotals(data) {
   const up = links.reduce((total, link) => total + link.rateOut, 0);
   const active = links.reduce((total, link) => total + link.active, 0);
   const udp = links.reduce((total, link) => total + link.udpFlows, 0);
+  const bytesIn = links.reduce((total, link) => total + link.bytesIn, 0);
+  const bytesOut = links.reduce((total, link) => total + link.bytesOut, 0);
   const formattedDown = fmtRate(down).split(' ');
   $('totalDown').textContent = formattedDown[0];
   $('totalDownUnit').textContent = `${formattedDown[1]} down · ${mbps(down)} Mbps`;
   $('totalUp').textContent = `↑ ${fmtRate(up)} up · ${active} connections · ${udp} UDP flows · ${healthy.length}/${enabled.length} enabled links healthy`;
+  $('totalSession').textContent = `session total ↓ ${fmtBytes(bytesIn)} · ↑ ${fmtBytes(bytesOut)}`;
 
   const tunnel = data.tunnel;
   const line = $('tunnelLine');
@@ -415,9 +424,11 @@ function renderTotals(data) {
     const dotStyle = link.enabled
       ? (link.up ? '' : 'background:var(--red);box-shadow:none')
       : 'background:var(--muted);box-shadow:none';
+    const ping = link.enabled && link.up && link.latency != null ? `${link.latency} ms` : '—';
     return `<div class="bond-row ${link.up && link.enabled ? '' : 'dead'}">
       <span class="name"><span class="dot" aria-hidden="true" style="${dotStyle}"></span>${esc(link.name)}</span>
       <span class="bar" aria-hidden="true"><i style="width:${Math.min(100, (rate / state.barMax) * 100).toFixed(1)}%"></i></span>
+      <span class="ping">${ping}</span>
       <span class="rate">${mbps(rate)} Mbps</span>
     </div>`;
   }).join('') || '<div class="empty">No eligible internet links detected.</div>';
@@ -456,6 +467,12 @@ function createLinkCards(links) {
           <span><i style="background:#42cbd5"></i>download</span>
           <span><i style="background:#e3a72f"></i>upload</span>
         </div>
+        <div class="weight" title="Share of new connections in balanced rotation (1–100)">
+          <span>weight</span>
+          <button type="button" data-weight-step="-1" aria-label="Decrease weight of ${esc(link.name)}">−</button>
+          <b data-field="weight">1</b>
+          <button type="button" data-weight-step="1" aria-label="Increase weight of ${esc(link.name)}">+</button>
+        </div>
         <label class="switch">
           <input type="checkbox" data-link-index="${index}">
           <span aria-hidden="true"></span>
@@ -484,6 +501,7 @@ function renderLinks(links) {
     card.querySelector('[data-field="bytes-in"]').textContent = fmtBytes(link.bytesIn);
     card.querySelector('[data-field="rate-out"]').textContent = fmtRate(link.rateOut);
     card.querySelector('[data-field="bytes-out"]').textContent = fmtBytes(link.bytesOut);
+    card.querySelector('[data-field="weight"]').textContent = link.weight;
     const toggle = card.querySelector('input[data-link-index]');
     if (toggle.dataset.pending !== 'true') toggle.checked = link.enabled;
     toggle.setAttribute('aria-label', `${link.enabled ? 'Disable' : 'Enable'} ${link.name}`);
@@ -542,6 +560,27 @@ $('strategySeg').onclick = async (event) => {
   try {
     await api('/api/strategy', { strategy: button.dataset.strategy });
     showNotice(`Traffic strategy changed to ${STRATEGY_LABELS[button.dataset.strategy] ?? button.dataset.strategy}.`);
+    await tick();
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    buttons.forEach((item) => { item.disabled = false; });
+  }
+};
+
+$('links').onclick = async (event) => {
+  const button = event.target.closest('button[data-weight-step]');
+  if (!button) return;
+  const card = button.closest('[data-link-card]');
+  const link = state.latest?.links[Number(card.dataset.linkCard)];
+  if (!link) return;
+  const weight = Math.min(100, Math.max(1, Math.round(link.weight) + Number(button.dataset.weightStep)));
+  if (weight === link.weight) return;
+  const buttons = card.querySelectorAll('button[data-weight-step]');
+  buttons.forEach((item) => { item.disabled = true; });
+  try {
+    const result = await api('/api/links/weight', { name: link.name, weight });
+    showNotice(`${result.name} weight set to ${result.weight}.`);
     await tick();
   } catch (error) {
     showNotice(error.message, 'error');

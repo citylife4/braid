@@ -24,6 +24,9 @@ async function withDashboard(run, { captureStatus } = {}) {
     stats: () => ({ links: [], events: [] }),
     setStrategy: (strategy) => ({ ok: true, strategy }),
     toggleLink: (name) => ({ ok: true, name, enabled: false }),
+    setWeight: (name, weight) => (Number.isFinite(weight) && weight >= 1
+      ? { ok: true, name, weight }
+      : { ok: false, error: 'weight must be a number between 1 and 100' }),
   };
   const capture = {
     status: () => captureStatus ?? ({ active: false, adapterUp: false, engineRunning: false, ownership: 'none' }),
@@ -89,6 +92,34 @@ test('accepts same-origin API requests with the control header', async () => {
     });
     assert.equal(response.status, 200);
     assert.deepEqual(JSON.parse(response.body), { ok: true, strategy: 'failover' });
+  });
+});
+
+test('sets and validates link weights over the control API', async () => {
+  await withDashboard(async (port) => {
+    const headers = {
+      host: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port}`,
+      'content-type': 'application/json',
+      'x-braid': '1',
+    };
+    const accepted = await request(port, {
+      method: 'POST',
+      path: '/api/links/weight',
+      headers,
+      body: JSON.stringify({ name: 'Wi-Fi', weight: 4 }),
+    });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(JSON.parse(accepted.body), { ok: true, name: 'Wi-Fi', weight: 4 });
+
+    const rejected = await request(port, {
+      method: 'POST',
+      path: '/api/links/weight',
+      headers,
+      body: JSON.stringify({ name: 'Wi-Fi', weight: 'heavy' }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(JSON.parse(rejected.body).ok, false);
   });
 });
 

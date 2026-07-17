@@ -72,9 +72,11 @@ export class TunnelClient {
     this.opening = new Map(); // streamId -> { resolve, reject }
     this.pending = []; // frames waiting for a ready subflow
     this.readyWaiters = [];
+    this.reconnects = new Set(); // pending subflow reconnect timers
     this.nextId = 1;
     this.streamCount = 0;
     this.timer = null;
+    this.closed = false;
   }
 
   start() {
@@ -86,7 +88,10 @@ export class TunnelClient {
   }
 
   stop() {
+    this.closed = true;
     clearInterval(this.timer);
+    for (const timer of this.reconnects) clearTimeout(timer);
+    this.reconnects.clear();
     for (const sf of this.subflows.values()) sf.socket.destroy();
   }
 
@@ -97,7 +102,7 @@ export class TunnelClient {
   }
 
   openSubflow(link) {
-    if (this.subflows.has(link.name)) return;
+    if (this.closed || this.subflows.has(link.name)) return;
     let socket;
     try {
       socket = net.connect({ host: this.host, port: this.port, localAddress: link.address, noDelay: true });
@@ -105,7 +110,7 @@ export class TunnelClient {
       this.log.debug(`tunnel: subflow via ${link.name} failed to start: ${err.message}`);
       return;
     }
-    const sf = { socket, link, ready: false, parser: new FrameParser(), lastPong: Date.now(), lastPing: 0, reconnect: null };
+    const sf = { socket, link, ready: false, parser: new FrameParser(), lastPong: Date.now(), lastPing: 0 };
     this.subflows.set(link.name, sf);
     socket.on('connect', () => socket.write(encodeHello(this.tunnelId, this.secret)));
     socket.on('data', (chunk) => {
@@ -131,10 +136,13 @@ export class TunnelClient {
       for (const engine of this.engines.values()) engine.retransmitAll();
     }
     // Reconnect while the link is still considered up.
-    sf.reconnect = setTimeout(() => {
+    if (this.closed) return;
+    const timer = setTimeout(() => {
+      this.reconnects.delete(timer);
       const link = this.manager.links.find((l) => l.name === sf.link.name);
       if (link && link.up && link.enabled) this.openSubflow(link);
     }, RECONNECT_MS);
+    this.reconnects.add(timer);
   }
 
   closeSubflow(name) {

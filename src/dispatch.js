@@ -47,6 +47,11 @@ export function createPicker(manager) {
 
 export async function dial(options, host, port, { timeout = 8000, onRetry } = {}) {
   const { manager, pick } = options;
+  // Links bind IPv4 source addresses, so an IPv6 literal can never be dialed.
+  // Refuse it up front rather than letting the EINVAL count as a link failure.
+  if (net.isIP(host) === 6) {
+    throw Object.assign(new Error('IPv6 targets are not supported'), { code: 'EAFNOSUPPORT' });
+  }
   let address = host;
   if (!net.isIP(host)) {
     address = await manager.resolveHost(host); // throws ENOTFOUND etc. for the caller
