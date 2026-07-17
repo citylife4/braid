@@ -1,7 +1,7 @@
 {
   "name": "braid",
   "productName": "Braid",
-  "version": "3.1.3",
+  "version": "3.2.0",
   "description": "Bond multiple internet connections (Wi-Fi + Ethernet + hotspots) into one reliable connection with system-wide capture and true single-stream aggregation - a Speedify-style channel bonder.",
   "author": "citylife4",
   "type": "module",
