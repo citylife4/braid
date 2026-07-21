@@ -24,6 +24,8 @@ let monitor = null;
 let allowQuit = false;
 let quitInProgress = false;
 let captureTransition = null;
+let lastStats = null; // most recent /api/stats, drives the tray menu extras
+let wifiMenuSignature = '';
 
 const preferences = {
   autoCapture: true,
@@ -127,6 +129,7 @@ async function request(pathname, options = {}, timeout = 1800) {
 async function getStats() {
   try {
     const stats = await request('/api/stats');
+    if (stats?.version) lastStats = stats;
     return stats?.version ? stats : null;
   } catch {
     return null;
@@ -269,6 +272,7 @@ function updateTray() {
 function rebuildMenu() {
   if (!tray) return;
   const running = isRunning();
+  const wifiAssist = lastStats?.wifiAssist;
   const menu = Menu.buildFromTemplate([
     { label: service.transition ? 'Changing state…' : running ? 'Braid is running' : 'Braid is stopped', enabled: false },
     { label: 'Open Braid', enabled: !service.transition, click: () => { openDashboard(); } },
@@ -288,10 +292,52 @@ function rebuildMenu() {
       checked: preferences.autoCapture,
       click: (item) => { toggleAutomaticCapture(item.checked); },
     },
+    ...(wifiAssist?.supported ? [{
+      label: 'Keep Wi-Fi connected (Wi-Fi assist)',
+      type: 'checkbox',
+      checked: Boolean(wifiAssist.enabled),
+      enabled: running && !service.transition,
+      click: (item) => { toggleWifiAssist(item.checked); },
+    }] : []),
+    ...(wifiAssist?.supported && wifiAssist.policy === 'default' ? [{
+      label: 'Stop Windows dropping Wi-Fi…',
+      enabled: running && !service.transition && !wifiAssist.fixingPolicy,
+      click: () => { fixWifiPolicy(); },
+    }] : []),
     { type: 'separator' },
     { label: 'Quit Braid', click: () => { quitApplication(); } },
   ]);
   tray.setContextMenu(menu);
+}
+
+async function toggleWifiAssist(enabled) {
+  try {
+    await request('/api/wifi-assist', { method: 'POST', body: JSON.stringify({ enabled }) });
+    await getStats();
+  } catch (error) {
+    await writeLog(`wifi assist toggle failed: ${error.message}`);
+    if (!SMOKE_TEST) {
+      dialog.showMessageBox({ type: 'warning', title: 'Wi-Fi assist', message: 'Could not change Wi-Fi assist.', detail: error.message });
+    }
+  } finally {
+    rebuildMenu();
+  }
+}
+
+async function fixWifiPolicy() {
+  showBalloon('Braid needs approval', 'Approve the Windows prompt so Wi-Fi stays connected alongside Ethernet.');
+  try {
+    await request('/api/wifi-policy', { method: 'POST', body: '{}' }, 180000);
+    showBalloon('Wi-Fi policy applied', 'Windows will keep Wi-Fi connected while Ethernet is up.');
+  } catch (error) {
+    await writeLog(`wifi policy fix failed: ${error.message}`);
+    if (!SMOKE_TEST) {
+      dialog.showMessageBox({ type: 'warning', title: 'Wi-Fi policy', message: 'Windows did not apply the Wi-Fi policy.', detail: error.message });
+    }
+  } finally {
+    await getStats();
+    rebuildMenu();
+  }
 }
 
 function showBalloon(title, content, iconType = 'info') {
@@ -668,6 +714,15 @@ app.whenReady().then(async () => {
       service.lastError = 'The attached Braid service stopped.';
       destroyDashboardWindow();
       updateTray();
+    }
+    // Refresh the tray menu when the Wi-Fi assist state changes elsewhere
+    // (e.g. toggled from the dashboard window).
+    const signature = JSON.stringify([
+      stats?.wifiAssist?.supported, stats?.wifiAssist?.enabled, stats?.wifiAssist?.policy,
+    ]);
+    if (signature !== wifiMenuSignature) {
+      wifiMenuSignature = signature;
+      rebuildMenu();
     }
   }, 5000);
 }).catch(async (error) => {

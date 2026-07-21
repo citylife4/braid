@@ -6,9 +6,12 @@ import { CHUNK, encodeData, encodeAck, encodeFin, encodeReset } from './frame.js
 // they arrive out of order and a dying subflow can drop whatever it was
 // carrying. This engine rebuilds a clean, ordered byte stream on top of that:
 //
-//   send side  - number every frame, keep unacked frames, retransmit on any
-//                surviving subflow when a cumulative ACK stalls or a subflow
-//                dies. A bounded send window gives end-to-end flow control.
+//   send side  - number every frame, keep unacked frames and remember which
+//                subflow carried them. When a subflow dies, only ITS frames
+//                are retransmitted (on the survivors); when a cumulative ACK
+//                stalls, the oldest in-flight frames are re-sent in a bounded
+//                batch, preferring a different subflow than last time. A
+//                bounded send window gives end-to-end flow control.
 //   recv side  - reorder by sequence, drop duplicates, deliver contiguously,
 //                and pause delivery (stop ACKing) when the sink is slow.
 //
@@ -18,13 +21,17 @@ export const SEND_WINDOW = 4 * 1024 * 1024;
 const ACK_DELAY_MS = 4;
 const RTO_MIN = 500;
 const RTO_MAX = 4000;
+// Cap how much a stalled stream re-sends per RTO. Re-sending the oldest frames
+// first unblocks the receiver's head-of-line without duplicating a whole
+// window's worth of data the way a blanket retransmit would.
+const RETRANSMIT_BATCH = 64; // frames (~1 MB at 16 KB CHUNK)
 
 const FIN_MARK = Symbol('fin');
 
 export class StreamEngine {
   constructor(streamId, { send, onDeliver, onFinDelivered, onReset, onWindow }) {
     this.id = streamId;
-    this.send = send; // (framedBuffer) => void  — hands a frame to the tunnel scheduler
+    this.send = send; // (frame, avoidVia) => viaId | null — hands a frame to the tunnel scheduler
     this.onDeliver = onDeliver; // (payload) => boolean  — false means "sink is full, pause"
     this.onFinDelivered = onFinDelivered;
     this.onReset = onReset;
@@ -32,7 +39,7 @@ export class StreamEngine {
 
     // send side
     this.seqNext = 0;
-    this.unacked = new Map(); // seq -> { frame, len }
+    this.unacked = new Map(); // seq -> { frame, len, via, sentAt }
     this.unackedBytes = 0;
     this.finSent = false;
     this.rto = RTO_MIN;
@@ -53,6 +60,13 @@ export class StreamEngine {
     return this.unackedBytes < SEND_WINDOW;
   }
 
+  // Hand a frame to the scheduler, remembering which subflow took it so a
+  // dying subflow can retransmit exactly its own frames.
+  dispatch(entry, avoid = null) {
+    entry.via = this.send(entry.frame, avoid) ?? null;
+    entry.sentAt = Date.now();
+  }
+
   // App/target -> wire. Splits into CHUNK-sized DATA frames.
   write(chunk) {
     let off = 0;
@@ -60,10 +74,10 @@ export class StreamEngine {
       const slice = chunk.subarray(off, off + CHUNK);
       off += slice.length || 1;
       const seq = this.seqNext++;
-      const frame = encodeData(this.id, seq, slice);
-      this.unacked.set(seq, { frame, len: slice.length });
+      const entry = { frame: encodeData(this.id, seq, slice), len: slice.length, via: null, sentAt: 0 };
+      this.unacked.set(seq, entry);
       this.unackedBytes += slice.length;
-      this.send(frame);
+      this.dispatch(entry);
     } while (off < chunk.length);
   }
 
@@ -71,9 +85,9 @@ export class StreamEngine {
     if (this.finSent) return;
     this.finSent = true;
     const seq = this.seqNext++;
-    const frame = encodeFin(this.id, seq);
-    this.unacked.set(seq, { frame, len: 0 });
-    this.send(frame);
+    const entry = { frame: encodeFin(this.id, seq), len: 0, via: null, sentAt: 0 };
+    this.unacked.set(seq, entry);
+    this.dispatch(entry);
   }
 
   // Cumulative ACK: peer has contiguously received everything below nextSeq.
@@ -140,17 +154,34 @@ export class StreamEngine {
     }, ACK_DELAY_MS);
   }
 
-  // Called when a subflow dies: resend everything still in flight at once.
-  retransmitAll() {
-    for (const { frame } of this.unacked.values()) this.send(frame);
-    this.lastProgress = Date.now();
+  // A subflow died: re-send exactly the frames it was carrying, preferring a
+  // surviving subflow. Frames on healthy subflows stay where they are.
+  retransmitFor(viaId) {
+    let moved = 0;
+    for (const entry of this.unacked.values()) {
+      if (entry.via !== viaId) continue;
+      this.dispatch(entry, viaId);
+      moved += 1;
+    }
+    if (moved) this.lastProgress = Date.now();
+    return moved;
   }
 
-  // Periodic tick from the tunnel. Retransmits on RTO, reports when the
-  // stream is fully finished (both directions) after a short linger.
+  // Periodic tick from the tunnel. When the cumulative ACK stalls, re-send
+  // the oldest still-unacked frames (a bounded batch, oldest first — the
+  // receiver's head-of-line), each preferably on a different subflow than
+  // the one that stalled.
   tick(now) {
-    if (this.unacked.size && now - this.lastProgress > this.rto) {
-      this.retransmitAll();
+    if (!this.unacked.size || now - this.lastProgress <= this.rto) return;
+    let sent = 0;
+    for (const entry of this.unacked.values()) {
+      if (now - entry.sentAt <= this.rto) continue;
+      this.dispatch(entry, entry.via);
+      sent += 1;
+      if (sent >= RETRANSMIT_BATCH) break;
+    }
+    if (sent) {
+      this.lastProgress = now;
       this.rto = Math.min(RTO_MAX, this.rto * 2);
     }
   }

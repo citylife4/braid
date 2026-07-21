@@ -66,6 +66,16 @@
 
   .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
   .control-label { color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
+  .sys-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+  .tunnel-config { margin: 2px 0 4px; }
+  .tunnel-config .fields { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 8px; }
+  .tunnel-config input { font: inherit; font-size: 13px; background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--text); min-width: 0; }
+  .tunnel-config input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .tunnel-config .f-host { flex: 2 1 150px; }
+  .tunnel-config .f-port { flex: 0 1 88px; }
+  .tunnel-config .f-secret { flex: 2 1 140px; }
+  .tunnel-config .actions { display: flex; gap: 8px; align-items: center; }
+  .tunnel-config code { background: var(--card2); border-radius: 5px; padding: 1px 5px; font-size: 11.5px; }
   .seg { display: inline-flex; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
   .seg button { border: 0; background: transparent; padding: 6px 14px; border-radius: 7px; font-weight: 500; color: var(--muted); }
   .seg button.active { background: var(--accent); color: #fff; font-weight: 600; }
@@ -162,6 +172,26 @@
     <div class="subtotal" id="totalUp">↑ 0 B/s up · 0 active connections</div>
     <div class="subtotal" id="totalSession">session total ↓ 0 B · ↑ 0 B</div>
     <div class="tunnel-line" id="tunnelLine" style="display:none"></div>
+    <div class="tunnel-config" id="tunnelBox">
+      <span class="actions">
+        <button id="tunnelSetupBtn" class="ghost" type="button">Set up true bonding (VPS relay)…</button>
+        <button id="tunnelOffBtn" class="ghost" type="button" style="display:none">Disconnect</button>
+      </span>
+      <div id="tunnelForm" style="display:none">
+        <div class="fields">
+          <input id="tunnelHost" class="f-host" type="text" placeholder="vps.example.com" spellcheck="false" aria-label="braid-server host">
+          <input id="tunnelPort" class="f-port" type="number" min="1" max="65535" placeholder="7000" aria-label="braid-server port">
+          <input id="tunnelSecret" class="f-secret" type="password" placeholder="shared secret" aria-label="shared secret">
+        </div>
+        <div class="actions">
+          <button id="tunnelConnectBtn" class="primary" type="button">Connect</button>
+          <button id="tunnelCancelBtn" class="ghost" type="button">Cancel</button>
+        </div>
+        <div class="hint">Makes a <i>single</i> download use every link at once. On a VPS run
+          <code>node bin/braid-server.js --port 7000 --secret "…"</code>, open that TCP port,
+          then connect here. Update the VPS's braid together with this machine.</div>
+      </div>
+    </div>
     <div id="bondRows"></div>
   </div>
 </div>
@@ -170,6 +200,28 @@
   <span class="control-label" id="strategyLabel">Traffic strategy</span>
   <div class="seg" id="strategySeg" role="group" aria-label="Traffic strategy"></div>
   <span class="hint" id="strategyHint"></span>
+</div>
+
+<div class="controls" id="sysControls" style="display:none">
+  <span class="control-label">System</span>
+  <span class="sys-toggle" id="autostartWrap" style="display:none">
+    <label class="switch">
+      <input type="checkbox" id="autostartSwitch" aria-label="Start braid when Windows starts">
+      <span aria-hidden="true"></span>
+    </label>
+    Start with Windows
+  </span>
+  <span class="sys-toggle" id="wifiWrap" style="display:none" title="Windows drops Wi-Fi when Ethernet has internet; this keeps reconnecting it so both links stay in the bond">
+    <label class="switch">
+      <input type="checkbox" id="wifiSwitch" aria-label="Keep Wi-Fi connected while Ethernet is up">
+      <span aria-hidden="true"></span>
+    </label>
+    Wi-Fi assist
+  </span>
+  <button id="wifiPolicyBtn" class="ghost" type="button" style="display:none"
+    title="Sets the Windows Connection Manager policy so Wi-Fi is never soft-disconnected while Ethernet is up. Shows a Windows administrator prompt.">
+    Stop Windows dropping Wi-Fi (admin)…</button>
+  <span class="hint" id="wifiDetail"></span>
 </div>
 
 <section class="links" id="links" aria-label="Network links"></section>
@@ -184,11 +236,13 @@ const esc = (value) => String(value).replace(/[&<>"]/g, (char) => ({
 }[char]));
 
 const STRATEGY_HINTS = {
+  adaptive: 'New connections favor fast, lightly-loaded links; slow or flaky links get less traffic automatically.',
   balanced: 'Connections rotate across healthy links; configured weights are respected.',
   'least-busy': 'New connections use the link with the fewest active connections.',
   failover: 'The first healthy link carries traffic; the others stay ready as backups.',
 };
 const STRATEGY_LABELS = {
+  adaptive: 'Adaptive',
   balanced: 'Balanced',
   'least-busy': 'Least busy',
   failover: 'Failover',
@@ -413,7 +467,11 @@ function renderTotals(data) {
     line.style.display = 'flex';
     const tunnelHealthy = tunnel.subflows > 0;
     line.className = `tunnel-line${tunnelHealthy ? '' : ' off'}`;
-    line.innerHTML = `<span class="tag">TRUE BONDING</span><span class="detail">${tunnelHealthy ? 'single streams split across links' : 'connecting…'} · via ${esc(tunnel.server)} · ${tunnel.subflows}/${tunnel.total} subflows · ${tunnel.streams} streams</span>`;
+    const rtts = (tunnel.links ?? [])
+      .filter((sub) => sub.ready && sub.rtt != null)
+      .map((sub) => `${esc(sub.link)} ${sub.rtt} ms`)
+      .join(' · ');
+    line.innerHTML = `<span class="tag">TRUE BONDING</span><span class="detail">${tunnelHealthy ? 'single streams split across links' : 'connecting…'} · via ${esc(tunnel.server)} · ${tunnel.subflows}/${tunnel.total} subflows · ${tunnel.streams} streams${rtts ? ` · ${rtts}` : ''}</span>`;
   } else {
     line.style.display = 'none';
   }
@@ -511,6 +569,45 @@ function renderLinks(links) {
   });
 }
 
+function renderToggle(input, wrap, feature) {
+  if (!feature?.supported) {
+    wrap.style.display = 'none';
+    return false;
+  }
+  wrap.style.display = 'inline-flex';
+  if (input.dataset.pending !== 'true') input.checked = Boolean(feature.enabled);
+  return true;
+}
+
+function renderSystem(data) {
+  const hasAutostart = renderToggle($('autostartSwitch'), $('autostartWrap'), data.autostart);
+  const wifi = data.wifiAssist;
+  const hasWifi = renderToggle($('wifiSwitch'), $('wifiWrap'), wifi);
+  $('sysControls').style.display = hasAutostart || hasWifi ? 'flex' : 'none';
+
+  const policyBtn = $('wifiPolicyBtn');
+  if (hasWifi && wifi.policy === 'default' && !state.policyPending) {
+    policyBtn.style.display = 'inline-block';
+    policyBtn.disabled = Boolean(wifi.fixingPolicy);
+    policyBtn.textContent = wifi.fixingPolicy
+      ? 'Waiting for Windows approval…'
+      : 'Stop Windows dropping Wi-Fi (admin)…';
+  } else if (!state.policyPending) {
+    policyBtn.style.display = 'none';
+  }
+
+  const details = [];
+  if (hasWifi && wifi.enabled) details.push(wifi.detail);
+  if (hasWifi && wifi.policy === 'applied') details.push('Windows keeps Wi-Fi with Ethernet ✓');
+  $('wifiDetail').textContent = details.join(' · ');
+}
+
+function renderTunnelBox(tunnel) {
+  const enabled = Boolean(tunnel?.enabled);
+  $('tunnelOffBtn').style.display = enabled ? 'inline-block' : 'none';
+  $('tunnelSetupBtn').textContent = enabled ? 'Change server…' : 'Set up true bonding (VPS relay)…';
+}
+
 function renderEvents(events) {
   $('events').innerHTML = events.slice(0, 40).map((event) => {
     const kind = event.kind === 'up' || event.kind === 'down' ? event.kind : '';
@@ -540,6 +637,8 @@ async function tick() {
     state.lastCaptureState = captureActive;
     renderTotals(data);
     renderStrategies(data);
+    renderSystem(data);
+    renderTunnelBox(data.tunnel);
     renderLinks(data.links);
     renderEvents(data.events);
   } catch (error) {
@@ -606,6 +705,99 @@ $('links').onchange = async (event) => {
   } finally {
     delete input.dataset.pending;
     input.disabled = false;
+  }
+};
+
+async function toggleSystemFeature(input, path, labels) {
+  input.disabled = true;
+  input.dataset.pending = 'true';
+  try {
+    const result = await api(path, { enabled: input.checked });
+    showNotice(result.enabled ? labels.on : labels.off);
+    await tick();
+  } catch (error) {
+    input.checked = !input.checked;
+    showNotice(error.message, 'error');
+  } finally {
+    delete input.dataset.pending;
+    input.disabled = false;
+  }
+}
+
+$('autostartSwitch').onchange = () => toggleSystemFeature($('autostartSwitch'), '/api/autostart', {
+  on: 'Braid will start with Windows (hidden, no window).',
+  off: 'Braid will no longer start with Windows.',
+});
+
+$('wifiSwitch').onchange = () => toggleSystemFeature($('wifiSwitch'), '/api/wifi-assist', {
+  on: 'Wi-Fi assist on — Wi-Fi will be kept connected alongside Ethernet.',
+  off: 'Wi-Fi assist off.',
+});
+
+$('wifiPolicyBtn').onclick = async () => {
+  const button = $('wifiPolicyBtn');
+  button.disabled = true;
+  button.textContent = 'Waiting for Windows approval…';
+  state.policyPending = true;
+  try {
+    await api('/api/wifi-policy');
+    showNotice('Done — Windows will keep Wi-Fi connected while Ethernet is up.');
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    state.policyPending = false;
+    await tick();
+  }
+};
+
+function tunnelFormOpen(open) {
+  $('tunnelForm').style.display = open ? 'block' : 'none';
+  $('tunnelSetupBtn').style.display = open ? 'none' : 'inline-block';
+  if (open) {
+    const saved = state.latest?.tunnel?.saved;
+    $('tunnelHost').value = saved?.host ?? '';
+    $('tunnelPort').value = saved?.port ?? 7000;
+    $('tunnelSecret').value = '';
+    $('tunnelSecret').placeholder = saved?.hasSecret ? 'leave blank to keep the saved secret' : 'shared secret';
+    $('tunnelHost').focus();
+  }
+}
+
+$('tunnelSetupBtn').onclick = () => tunnelFormOpen(true);
+$('tunnelCancelBtn').onclick = () => tunnelFormOpen(false);
+
+$('tunnelConnectBtn').onclick = async () => {
+  const button = $('tunnelConnectBtn');
+  const saved = state.latest?.tunnel?.saved;
+  const body = { host: $('tunnelHost').value.trim(), port: Number($('tunnelPort').value) };
+  const secret = $('tunnelSecret').value;
+  // An untouched empty secret field keeps the already-saved secret.
+  if (secret || !saved?.hasSecret) body.secret = secret;
+  button.disabled = true;
+  try {
+    const result = await api('/api/tunnel', body);
+    showNotice(`True bonding enabled via ${result.server}. Run the same braid version on the server.`);
+    tunnelFormOpen(false);
+    await tick();
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+};
+
+$('tunnelOffBtn').onclick = async () => {
+  const button = $('tunnelOffBtn');
+  button.disabled = true;
+  try {
+    await api('/api/tunnel', { enabled: false });
+    showNotice('True bonding disabled — connections ride single links again.');
+    tunnelFormOpen(false);
+    await tick();
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 };
 

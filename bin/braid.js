@@ -7,6 +7,9 @@ import { createPicker } from '../src/dispatch.js';
 import { createProxyServer } from '../src/proxy.js';
 import { createDashboard } from '../src/dashboard.js';
 import { createCapture } from '../src/capture.js';
+import { createAutostart } from '../src/autostart.js';
+import { createWifiAssist } from '../src/wifi.js';
+import { loadSettings, saveSettings } from '../src/settings.js';
 import { TunnelClient } from '../src/tunnel/client.js';
 import { openBrowser } from '../src/open-browser.js';
 
@@ -23,11 +26,13 @@ Options:
   --links <spec>        Comma-separated links to bond, by interface
                         name or IPv4 address, optional =weight,
                         e.g. --links "Ethernet=3,Wi-Fi=1"            (default: all)
-  --strategy <name>     balanced | least-busy | failover             (default balanced)
+  --strategy <name>     adaptive | balanced | least-busy | failover  (default adaptive)
   --server <host:port>  Bond through a braid-server for TRUE single-stream
                         aggregation (summed bandwidth on one connection)
   --secret <token>      Shared secret for --server
   --open                Open the control panel in a browser once ready
+  --wifi-assist         Keep Wi-Fi connected even while Ethernet is up
+                        (also a toggle in the GUI)
   --check-interval <s>  Seconds between link health checks           (default 5)
   --check-timeout <s>   Health check timeout in seconds              (default 3)
   --verbose             Log every proxied connection
@@ -62,10 +67,11 @@ function parseArgs(argv) {
     bind: '127.0.0.1',
     dashboard: 8181,
     links: null,
-    strategy: 'balanced',
+    strategy: 'adaptive',
     server: null,
     secret: '',
     open: false,
+    wifiAssist: false,
     checkInterval: 5,
     checkTimeout: 3,
     verbose: false,
@@ -89,6 +95,7 @@ function parseArgs(argv) {
       case '--server': args.server = value(); break;
       case '--secret': args.secret = value(); break;
       case '--open': args.open = true; break;
+      case '--wifi-assist': args.wifiAssist = true; break;
       case '--check-interval': args.checkInterval = Number(value()); break;
       case '--check-timeout': args.checkTimeout = Number(value()); break;
       case '--verbose': args.verbose = true; break;
@@ -182,15 +189,83 @@ manager.on('down', (link) => log.info(`${red('●')} ${link.name} (${link.addres
 manager.on('added', (link) => log.info(`${green('●')} ${link.name} (${link.address}) ${green('connected')} — added to the bond`));
 
 const capture = createCapture({ proxyPort: args.port, dashboardPort: args.dashboard, log });
+const autostart = createAutostart({ log });
+const settings = loadSettings(log);
 
-let tunnel = null;
-if (args.server) {
-  tunnel = new TunnelClient(manager, { host: args.server.host, port: args.server.port, secret: args.secret, log });
+const wifiAssist = createWifiAssist({ log, record: (kind, message) => manager.record(kind, message) });
+// GUI toggles persist; the CLI flag applies to this run without being saved.
+const wifi = {
+  status: () => wifiAssist.status(),
+  fixPolicy: () => wifiAssist.fixPolicy(),
+  setEnabled: (enabled) => {
+    const result = wifiAssist.setEnabled(enabled);
+    if (result.ok) saveSettings({ wifiAssist: Boolean(enabled) }, log);
+    return result;
+  },
+};
+if (args.wifiAssist || settings.wifiAssist) wifiAssist.setEnabled(true);
+
+// The bonding server is runtime-configurable from the GUI: the proxy reads
+// runtime.tunnel on every new connection, so swapping the client (or removing
+// it) applies immediately without a restart.
+const runtime = { manager, pick, log, bindAddress: args.bind, tunnel: null };
+
+function setTunnel(config) {
+  if (runtime.tunnel) {
+    runtime.tunnel.stop();
+    runtime.tunnel = null;
+  }
+  if (config) {
+    runtime.tunnel = new TunnelClient(manager, { host: config.host, port: config.port, secret: config.secret ?? '', log });
+    runtime.tunnel.start();
+  }
 }
+
+function savedTunnelSummary() {
+  const saved = loadSettings(log).tunnel;
+  return saved?.host ? { host: saved.host, port: saved.port, hasSecret: Boolean(saved.secret) } : null;
+}
+
+const tunnelControl = {
+  status: () => (runtime.tunnel
+    ? { ...runtime.tunnel.status(), saved: savedTunnelSummary() }
+    : { enabled: false, saved: savedTunnelSummary() }),
+  configure: ({ host, port, secret }) => {
+    const cleanHost = typeof host === 'string' ? host.trim() : '';
+    const cleanPort = Number(port);
+    // No secret in the request = keep the saved one (the GUI never echoes it).
+    const cleanSecret = secret == null ? (loadSettings(log).tunnel?.secret ?? '') : String(secret);
+    if (!cleanHost || cleanHost.length > 253 || /[\s/]/.test(cleanHost)) {
+      return { ok: false, error: 'enter the braid-server host name or IP' };
+    }
+    if (!Number.isInteger(cleanPort) || cleanPort < 1 || cleanPort > 65535) {
+      return { ok: false, error: 'server port must be 1-65535' };
+    }
+    if (cleanSecret.length > 256) return { ok: false, error: 'secret is too long (max 256 characters)' };
+    setTunnel({ host: cleanHost, port: cleanPort, secret: cleanSecret });
+    saveSettings({ tunnel: { host: cleanHost, port: cleanPort, secret: cleanSecret } }, log);
+    manager.record('info', `true bonding enabled via ${cleanHost}:${cleanPort}`);
+    log.info(`tunnel: bonding via ${cleanHost}:${cleanPort}`);
+    return { ok: true, server: `${cleanHost}:${cleanPort}` };
+  },
+  disable: () => {
+    if (runtime.tunnel) {
+      setTunnel(null);
+      manager.record('info', 'true bonding disabled — connections ride single links again');
+    }
+    saveSettings({ tunnel: null }, log);
+    return { ok: true, enabled: false };
+  },
+};
+
+// CLI flags win for this run; otherwise the GUI-saved server reconnects.
+const initialTunnel = args.server
+  ? { host: args.server.host, port: args.server.port, secret: args.secret }
+  : (settings.tunnel?.host ? settings.tunnel : null);
 
 const dashboardUrl = `http://127.0.0.1:${args.dashboard}`;
 
-const proxy = createProxyServer({ manager, pick, log, bindAddress: args.bind, tunnel });
+const proxy = createProxyServer(runtime);
 proxy.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     // Already running: if we were asked to open the GUI, just surface the
@@ -209,7 +284,7 @@ proxy.listen(args.port, args.bind, () => {
     console.log(`  ${green('●')} ${link.name.padEnd(28)} ${link.address.padEnd(16)} ${dim(`weight ${link.weight}`)}`);
   }
   console.log(`\n  Proxy      ${cyan(`${args.bind}:${args.port}`)}  ${dim('(SOCKS5 + UDP, SOCKS4/4a and HTTP on one port)')}`);
-  if (tunnel) console.log(`  Bonding    ${cyan(`${args.server.host}:${args.server.port}`)}  ${dim('(true single-stream aggregation via braid-server)')}`);
+  if (runtime.tunnel) console.log(`  Bonding    ${cyan(`${runtime.tunnel.host}:${runtime.tunnel.port}`)}  ${dim('(true single-stream aggregation via braid-server)')}`);
   if (args.dashboard) console.log(`  GUI        ${cyan(dashboardUrl)}  ${dim('(or run braid-gui.vbs)')}`);
   console.log(dim('\n  System-wide capture for all apps: use the GUI toggle (needs admin).'));
   console.log(dim('  Ctrl+C to stop.\n'));
@@ -220,9 +295,9 @@ proxy.listen(args.port, args.bind, () => {
   if (args.open && args.dashboard) openBrowser(dashboardUrl);
 });
 
-manager.record('info', `braid started with ${defs.length} link(s), strategy "${args.strategy}"${tunnel ? `, bonding via ${args.server.host}:${args.server.port}` : ''}`);
+manager.record('info', `braid started with ${defs.length} link(s), strategy "${args.strategy}"${initialTunnel ? `, bonding via ${initialTunnel.host}:${initialTunnel.port}` : ''}`);
 manager.start();
-if (tunnel) tunnel.start();
+if (initialTunnel) setTunnel(initialTunnel);
 
 function shutdown() {
   console.log('\nbraid stopped.');
@@ -233,13 +308,16 @@ if (args.dashboard) {
   const dashboard = createDashboard({
     manager,
     capture,
+    autostart,
+    wifi,
+    tunnelControl,
     onQuit: shutdown,
     meta: () => ({
       version: VERSION,
       strategies: STRATEGIES,
       proxy: `${args.bind}:${args.port}`,
       proxyPort: args.port,
-      tunnel: tunnel ? tunnel.status() : { enabled: false },
+      tunnel: tunnelControl.status(),
     }),
   });
   dashboard.on('error', (err) => log.error(`dashboard: ${err.message}`));

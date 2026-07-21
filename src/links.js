@@ -20,7 +20,7 @@ const DNS_CACHE_MAX = 512;
 export const WEIGHT_MIN = 1;
 export const WEIGHT_MAX = 100;
 
-export const STRATEGIES = ['balanced', 'least-busy', 'failover'];
+export const STRATEGIES = ['adaptive', 'balanced', 'least-busy', 'failover'];
 
 // Binding public traffic to overlay and VM adapters does not create another
 // independent internet path. It instead produces a permanently failing link

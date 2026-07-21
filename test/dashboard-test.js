@@ -33,9 +33,28 @@ async function withDashboard(run, { captureStatus } = {}) {
     enable: async () => ({ ok: true }),
     disable: async () => ({ ok: true }),
   };
+  const autostart = {
+    status: () => ({ supported: true, enabled: false }),
+    setEnabled: async (enabled) => ({ ok: true, enabled }),
+  };
+  const wifi = {
+    status: () => ({ supported: true, enabled: false, detail: 'off', policy: 'default' }),
+    setEnabled: (enabled) => ({ ok: true, enabled }),
+    fixPolicy: async () => ({ ok: true, policy: 'applied' }),
+  };
+  const tunnelControl = {
+    status: () => ({ enabled: false, saved: null }),
+    configure: ({ host, port }) => (host && Number.isInteger(Number(port))
+      ? { ok: true, server: `${host}:${port}` }
+      : { ok: false, error: 'enter the braid-server host name or IP' }),
+    disable: () => ({ ok: true, enabled: false }),
+  };
   const server = createDashboard({
     manager,
     capture,
+    autostart,
+    wifi,
+    tunnelControl,
     meta: () => ({ version: 'test', strategies: [], proxy: '127.0.0.1:1080' }),
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -120,6 +139,84 @@ test('sets and validates link weights over the control API', async () => {
     });
     assert.equal(rejected.status, 400);
     assert.equal(JSON.parse(rejected.body).ok, false);
+  });
+});
+
+test('exposes and toggles autostart and wifi assist', async () => {
+  await withDashboard(async (port) => {
+    const headers = {
+      host: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port}`,
+      'content-type': 'application/json',
+      'x-braid': '1',
+    };
+    const stats = await request(port, { path: '/api/stats', headers: { host: `127.0.0.1:${port}` } });
+    const parsed = JSON.parse(stats.body);
+    assert.deepEqual(parsed.autostart, { supported: true, enabled: false });
+    assert.equal(parsed.wifiAssist.supported, true);
+
+    const autostartOn = await request(port, {
+      method: 'POST',
+      path: '/api/autostart',
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(autostartOn.status, 200);
+    assert.deepEqual(JSON.parse(autostartOn.body), { ok: true, enabled: true });
+
+    const wifiOn = await request(port, {
+      method: 'POST',
+      path: '/api/wifi-assist',
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(wifiOn.status, 200);
+    assert.deepEqual(JSON.parse(wifiOn.body), { ok: true, enabled: true });
+  });
+});
+
+test('configures and disables the bonding server over the control API', async () => {
+  await withDashboard(async (port) => {
+    const headers = {
+      host: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port}`,
+      'content-type': 'application/json',
+      'x-braid': '1',
+    };
+    const connect = await request(port, {
+      method: 'POST',
+      path: '/api/tunnel',
+      headers,
+      body: JSON.stringify({ host: 'vps.example.com', port: 7000, secret: 'x' }),
+    });
+    assert.equal(connect.status, 200);
+    assert.deepEqual(JSON.parse(connect.body), { ok: true, server: 'vps.example.com:7000' });
+
+    const invalid = await request(port, {
+      method: 'POST',
+      path: '/api/tunnel',
+      headers,
+      body: JSON.stringify({ host: '', port: 7000 }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const off = await request(port, {
+      method: 'POST',
+      path: '/api/tunnel',
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(off.status, 200);
+    assert.deepEqual(JSON.parse(off.body), { ok: true, enabled: false });
+
+    const policy = await request(port, {
+      method: 'POST',
+      path: '/api/wifi-policy',
+      headers,
+      body: '{}',
+    });
+    assert.equal(policy.status, 200);
+    assert.deepEqual(JSON.parse(policy.body), { ok: true, policy: 'applied' });
   });
 });
 

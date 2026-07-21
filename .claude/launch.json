@@ -6,6 +6,12 @@
       "runtimeExecutable": "C:\\Users\\delfi\\AppData\\Local\\Programs\\node-v24.18.0-win-x64\\node.exe",
       "runtimeArgs": ["bin/braid.js", "--verbose"],
       "port": 8181
+    },
+    {
+      "name": "braid-dev",
+      "runtimeExecutable": "C:\\Users\\delfi\\AppData\\Local\\Programs\\node-v24.18.0-win-x64\\node.exe",
+      "runtimeArgs": ["bin/braid.js", "--verbose", "--port", "11080", "--dashboard", "18181"],
+      "port": 18181
     }
   ]
 }

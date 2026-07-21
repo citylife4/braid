@@ -28,6 +28,23 @@ export function createPicker(manager) {
 
     if (manager.strategy === 'failover') return pool[0];
 
+    // "adaptive": favor links that are fast (low health-check latency) and
+    // lightly loaded, scaled by weight. An unstable or slow link naturally
+    // receives fewer new connections without the user tuning anything.
+    if (manager.strategy === 'adaptive') {
+      let best = null;
+      let bestScore = Infinity;
+      for (const link of pool) {
+        const latency = Math.max(link.latency ?? 80, 15);
+        const score = ((link.active + 1) * latency) / (link.weight || 1);
+        if (score < bestScore) {
+          bestScore = score;
+          best = link;
+        }
+      }
+      return best;
+    }
+
     if (manager.strategy === 'least-busy') {
       return pool.reduce((best, link) => (!best || link.active < best.active ? link : best), null);
     }

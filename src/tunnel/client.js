@@ -8,9 +8,13 @@ import {
 import { StreamEngine } from './stream-engine.js';
 
 const RECONNECT_MS = 2000;
-const PING_MS = 10000;
-const DEAD_MS = 25000;
+// Fast pings do double duty: they measure each subflow's round-trip time for
+// the scheduler, and they catch a silently-dead subflow (USB Wi-Fi adapter
+// reset, powerline dropout) in seconds instead of half a minute.
+const PING_MS = 2000;
+const DEAD_MS = 7000;
 const LINGER_MS = 10000;
+const DEFAULT_RTT = 50; // ms, until the first pong lands
 
 // Map a server-reported OPEN_ERR code to a Node-style error code so the
 // proxy's existing SOCKS/HTTP error mapping keeps working unchanged.
@@ -29,7 +33,7 @@ class TunnelStream extends Duplex {
     this.tunnel = tunnel;
     this.writeCb = null;
     this.engine = new StreamEngine(id, {
-      send: (frame) => tunnel._send(frame),
+      send: (frame, avoid) => tunnel._send(frame, avoid),
       onDeliver: (payload) => this.push(payload),
       onFinDelivered: () => this.push(null),
       onReset: () => this.destroy(new Error('stream reset by peer')),
@@ -81,18 +85,34 @@ export class TunnelClient {
 
   start() {
     for (const link of this.manager.healthy()) this.openSubflow(link);
-    this.manager.on('up', (link) => this.openSubflow(link));
-    this.manager.on('added', (link) => this.openSubflow(link));
-    this.manager.on('down', (link) => this.closeSubflow(link.name));
+    // Named handlers so stop() can detach them — the GUI can reconfigure the
+    // bonding server at runtime, which replaces this client with a new one.
+    this.handlers = {
+      up: (link) => this.openSubflow(link),
+      added: (link) => this.openSubflow(link),
+      down: (link) => this.closeSubflow(link.name),
+    };
+    this.manager.on('up', this.handlers.up);
+    this.manager.on('added', this.handlers.added);
+    this.manager.on('down', this.handlers.down);
     this.timer = setInterval(() => this.tick(), 500);
   }
 
   stop() {
     this.closed = true;
     clearInterval(this.timer);
+    if (this.handlers) {
+      this.manager.off('up', this.handlers.up);
+      this.manager.off('added', this.handlers.added);
+      this.manager.off('down', this.handlers.down);
+      this.handlers = null;
+    }
     for (const timer of this.reconnects) clearTimeout(timer);
     this.reconnects.clear();
     for (const sf of this.subflows.values()) sf.socket.destroy();
+    for (const stream of [...this.streams.values()]) stream.destroy();
+    for (const engine of this.engines.values()) engine.destroy();
+    this.engines.clear();
   }
 
   readyCount() {
@@ -105,12 +125,15 @@ export class TunnelClient {
     if (this.closed || this.subflows.has(link.name)) return;
     let socket;
     try {
-      socket = net.connect({ host: this.host, port: this.port, localAddress: link.address, noDelay: true });
+      // A loopback server (local testing) is unreachable from a LAN-bound
+      // source address, so only bind to the link for real remote servers.
+      const loopback = this.host === 'localhost' || this.host === '::1' || this.host.startsWith('127.');
+      socket = net.connect({ host: this.host, port: this.port, localAddress: loopback ? undefined : link.address, noDelay: true });
     } catch (err) {
       this.log.debug(`tunnel: subflow via ${link.name} failed to start: ${err.message}`);
       return;
     }
-    const sf = { socket, link, ready: false, parser: new FrameParser(), lastPong: Date.now(), lastPing: 0 };
+    const sf = { socket, link, ready: false, parser: new FrameParser(), lastPong: Date.now(), lastPing: 0, pingSentAt: 0, srtt: null };
     this.subflows.set(link.name, sf);
     socket.on('connect', () => socket.write(encodeHello(this.tunnelId, this.secret)));
     socket.on('data', (chunk) => {
@@ -132,8 +155,8 @@ export class TunnelClient {
     const wasReady = sf.ready;
     sf.ready = false;
     if (wasReady) {
-      this.log.warn(`tunnel: subflow via ${sf.link.name} dropped — retransmitting in-flight data`);
-      for (const engine of this.engines.values()) engine.retransmitAll();
+      this.log.warn(`tunnel: subflow via ${sf.link.name} dropped — retransmitting its in-flight data`);
+      for (const engine of this.engines.values()) engine.retransmitFor(sf.link.name);
     }
     // Reconnect while the link is still considered up.
     if (this.closed) return;
@@ -161,6 +184,13 @@ export class TunnelClient {
         break;
       case T.PONG:
         sf.lastPong = Date.now();
+        if (sf.pingSentAt) {
+          // Pongs queue behind bulk data on a congested subflow, so this
+          // sample doubles as a queue-delay signal for the scheduler.
+          const sample = sf.lastPong - sf.pingSentAt;
+          sf.srtt = sf.srtt == null ? sample : Math.round(sf.srtt * 0.75 + sample * 0.25);
+          sf.pingSentAt = 0;
+        }
         break;
       case T.PING:
         sf.socket.write(encodePong());
@@ -199,30 +229,43 @@ export class TunnelClient {
     }
   }
 
-  // Weighted least-loaded subflow: spread by link weight, avoid the most
-  // backed-up socket. This is what turns one stream into N links of throughput.
-  pickSubflow() {
+  // Latency- and queue-aware subflow choice: prefer the link whose socket is
+  // least backed up AND answers pings fastest, scaled by the user's weight.
+  // This is what turns one stream into N links of throughput while keeping a
+  // slow or congested link from hoarding frames it cannot deliver in time.
+  // `avoid` skips a subflow (the one being retransmitted away from) unless it
+  // is the only one left.
+  pickSubflow(forData = true, avoid = null) {
     let best = null;
     let bestScore = Infinity;
+    let fallback = null;
     for (const sf of this.subflows.values()) {
       if (!sf.ready) continue;
-      const score = (sf.socket.writableLength + 1) / (sf.link.weight || 1);
+      const rtt = Math.max(sf.srtt ?? DEFAULT_RTT, 5);
+      const score = (sf.socket.writableLength + 1) * rtt / (forData ? (sf.link.weight || 1) : 1);
+      if (sf.link.name === avoid) {
+        fallback = sf;
+        continue;
+      }
       if (score < bestScore) {
         bestScore = score;
         best = sf;
       }
     }
-    return best;
+    return best ?? fallback;
   }
 
-  _send(frame) {
-    const sf = this.pickSubflow();
+  _send(frame, avoid = null) {
+    // Control frames (ACKs, opens, resets) are tiny and latency-critical:
+    // route them by pure responsiveness, not by data-spreading weight.
+    const sf = this.pickSubflow(frame[4] === T.DATA, avoid);
     if (!sf) {
       this.pending.push(frame);
-      return;
+      return null;
     }
     sf.socket.write(frame);
     sf.link.bytesOut += frame.length;
+    return sf.link.name;
   }
 
   drainPending() {
@@ -295,6 +338,7 @@ export class TunnelClient {
       }
       if (now - sf.lastPing >= PING_MS) {
         sf.lastPing = now;
+        if (!sf.pingSentAt) sf.pingSentAt = now; // keep the oldest unanswered ping
         sf.socket.write(encodePing());
       }
     }
@@ -317,6 +361,11 @@ export class TunnelClient {
       subflows: this.readyCount(),
       total: this.subflows.size,
       streams: this.streamCount,
+      links: [...this.subflows.values()].map((sf) => ({
+        link: sf.link.name,
+        ready: sf.ready,
+        rtt: sf.srtt,
+      })),
     };
   }
 }

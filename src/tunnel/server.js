@@ -1,12 +1,19 @@
 import net from 'node:net';
 import {
-  T, FrameParser, encodeHelloOk, encodeOpenOk, encodeOpenErr, encodePong,
+  T, FrameParser, encodeHelloOk, encodeOpenOk, encodeOpenErr, encodePing, encodePong,
   readStreamId, decodeHello, decodeOpen, decodeData, decodeSeq,
 } from './frame.js';
 import { StreamEngine } from './stream-engine.js';
 
 const LINGER_MS = 10000;
 const TUNNEL_IDLE_MS = 60000;
+// The server pings each subflow itself: the measured round-trip feeds the
+// downlink scheduler (most of a download's bytes flow server -> client), and
+// a subflow that stops answering is recycled in seconds so its frames move
+// to the surviving links quickly.
+const PING_MS = 2000;
+const DEAD_MS = 7000;
+const DEFAULT_RTT = 50;
 
 const ERR_TO_CODE = { ECONNREFUSED: 5, ENETUNREACH: 3, EHOSTUNREACH: 4, ETIMEDOUT: 4, ENOTFOUND: 4, EAI_AGAIN: 4 };
 
@@ -21,45 +28,68 @@ class ServerTunnel {
     this.subflows = new Set();
     this.streams = new Map(); // streamId -> { engine, target }
     this.lastSeen = Date.now();
+    this.nextSubflowId = 1;
   }
 
   addSubflow(socket) {
-    const sf = { socket };
+    const sf = { id: this.nextSubflowId++, socket, lastPong: Date.now(), lastPing: 0, pingSentAt: 0, srtt: null };
     this.subflows.add(sf);
+    // Frames that had no subflow to ride (all links blipped at once) are
+    // tagged via=null; dispatch them now instead of waiting out an RTO.
+    for (const { engine } of this.streams.values()) engine.retransmitFor(null);
     return sf;
   }
 
   removeSubflow(sf) {
     this.subflows.delete(sf);
-    // A dropped subflow may have been mid-frame; surviving subflows carry the
-    // retransmits, so just resend everything still in flight.
-    for (const { engine } of this.streams.values()) engine.retransmitAll();
+    // A dropped subflow may have been mid-frame; re-send exactly the frames
+    // it was carrying over the surviving subflows.
+    for (const { engine } of this.streams.values()) engine.retransmitFor(sf.id);
   }
 
-  pickSubflow() {
+  // Same scheduling as the client: least (queue × round-trip) wins, so a slow
+  // or congested link stops attracting frames before it stalls the stream.
+  pickSubflow(avoid = null) {
     let best = null;
-    let bestLen = Infinity;
+    let bestScore = Infinity;
+    let fallback = null;
     for (const sf of this.subflows) {
-      if (sf.socket.writableLength < bestLen) {
-        bestLen = sf.socket.writableLength;
+      const rtt = Math.max(sf.srtt ?? DEFAULT_RTT, 5);
+      const score = (sf.socket.writableLength + 1) * rtt;
+      if (sf.id === avoid) {
+        fallback = sf;
+        continue;
+      }
+      if (score < bestScore) {
+        bestScore = score;
         best = sf;
       }
     }
-    return best;
+    return best ?? fallback;
   }
 
-  send(frame) {
-    const sf = this.pickSubflow();
-    if (sf) sf.socket.write(frame);
+  send(frame, avoid = null) {
+    const sf = this.pickSubflow(avoid);
+    if (!sf) return null;
+    sf.socket.write(frame);
+    return sf.id;
   }
 
-  onFrame(type, body) {
+  onFrame(sf, type, body) {
     this.lastSeen = Date.now();
     switch (type) {
       case T.PING:
-        this.send(encodePong());
+        // Reply on the subflow the ping arrived on — the client uses the pong
+        // to judge that specific link's health and latency.
+        sf.socket.write(encodePong());
         break;
       case T.PONG:
+        sf.lastPong = Date.now();
+        if (sf.pingSentAt) {
+          const sample = sf.lastPong - sf.pingSentAt;
+          sf.srtt = sf.srtt == null ? sample : Math.round(sf.srtt * 0.75 + sample * 0.25);
+          sf.pingSentAt = 0;
+        }
         break;
       case T.OPEN:
         this.onOpen(decodeOpen(body));
@@ -94,7 +124,7 @@ class ServerTunnel {
     this.streams.set(streamId, rec);
 
     const engine = new StreamEngine(streamId, {
-      send: (frame) => this.send(frame),
+      send: (frame, avoid) => this.send(frame, avoid),
       onDeliver: (payload) => target.write(payload),
       onFinDelivered: () => target.end(),
       onReset: () => { target.destroy(); this.streams.delete(streamId); },
@@ -123,6 +153,18 @@ class ServerTunnel {
   }
 
   tick(now) {
+    for (const sf of [...this.subflows]) {
+      if (now - sf.lastPong > DEAD_MS) {
+        this.log.debug(`server: subflow ${sf.id} unresponsive — recycling`);
+        sf.socket.destroy(); // the close handler retransmits its frames
+        continue;
+      }
+      if (now - sf.lastPing >= PING_MS) {
+        sf.lastPing = now;
+        if (!sf.pingSentAt) sf.pingSentAt = now;
+        sf.socket.write(encodePing());
+      }
+    }
     for (const [id, rec] of this.streams) {
       rec.engine.tick(now);
       if (rec.engine.isFinished()) {
@@ -192,7 +234,7 @@ export class TunnelServer {
             sf = tunnel.addSubflow(socket);
             socket.write(encodeHelloOk());
           } else {
-            tunnel.onFrame(type, body);
+            tunnel.onFrame(sf, type, body);
           }
         });
       } catch (err) {
@@ -205,11 +247,11 @@ export class TunnelServer {
       this.connections -= 1;
       if (tunnel && sf) {
         tunnel.removeSubflow(sf);
-        if (tunnel.subflows.size === 0) {
-          tunnel.destroyAll();
-          this.tunnels.delete(tunnel.key);
-          this.log.info(`server: tunnel ${tunnel.key.slice(0, 8)} closed`);
-        }
+        // A tunnel that just lost its last subflow is NOT torn down here: all
+        // of a client's links can blip at once (USB adapter reset, laptop
+        // resume). Streams stay parked so reconnecting subflows resume them;
+        // tick() reaps the tunnel if the client stays away past the idle
+        // window.
       }
     });
   }
@@ -221,6 +263,7 @@ export class TunnelServer {
       if (tunnel.subflows.size === 0 && now - tunnel.lastSeen > TUNNEL_IDLE_MS) {
         tunnel.destroyAll();
         this.tunnels.delete(key);
+        this.log.info(`server: tunnel ${key.slice(0, 8)} closed (no subflows returned)`);
       }
     }
   }

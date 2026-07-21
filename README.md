@@ -113,12 +113,54 @@ an app window (Edge app mode). From it you can:
 - watch per-link throughput, latency, connections and UDP flows live,
 - see the **bonded total** across all links, and the **TRUE BONDING** badge with
   live subflow/stream counts when `--server` is set,
-- switch strategy on the fly (`balanced` / `least-busy` / `failover`),
+- switch strategy on the fly (`adaptive` / `balanced` / `least-busy` / `failover`),
 - enable/disable individual links with a switch,
 - adjust each link's **weight** (its share of new connections in balanced
   rotation) without restarting,
+- toggle **Start with Windows** (source launches; the packaged tray app has the
+  same toggle in its tray menu),
+- toggle **Wi-Fi assist** so Wi-Fi is reconnected even while Ethernet is up, and
+  apply the **"Stop Windows dropping Wi-Fi" policy fix** with one click (UAC),
+- set up **true bonding**: enter your braid-server's host, port and secret and
+  connect/disconnect at runtime — no restart, saved for the next launch,
 - follow the event log (link up/down, hot-plug, failovers, address changes),
 - **Quit** braid (needed since the hidden launcher has no console to Ctrl+C).
+
+Wi-Fi assist and the bonding-server settings persist in
+`%APPDATA%\braid\settings.json` (the shared secret is stored there in plain
+text, readable only by your user account). CLI flags always override the saved
+settings for that run. The tray menu mirrors the Wi-Fi controls, so both are
+reachable without opening the window.
+
+## Start with Windows
+
+- **Packaged app**: tray menu → **Start with Windows** (Electron login item).
+- **Running from source**: flip **Start with Windows** in the control panel. It
+  writes a per-user registry Run entry (no admin) that launches
+  `braid-gui.vbs /startup` at login: braid starts hidden, without popping the
+  control panel. Turn it off from the same switch, or delete the `Braid` value
+  under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+Use one mechanism or the other, not both. (If both do end up registered, the
+second instance notices the first and simply exits, so it stays harmless.)
+
+## Wi-Fi + Ethernet at the same time
+
+Windows assumes one connection is enough: when Ethernet has internet, it will
+not auto-connect Wi-Fi — and with the default *Windows Connection Manager*
+policy it soft-disconnects an already-connected Wi-Fi. That defeats a bonder.
+Two remedies, use either or both:
+
+- **Wi-Fi assist** (no admin) — the GUI/tray toggle, or start with
+  `--wifi-assist`. While enabled, braid watches the wireless adapter and
+  reconnects it to the strongest saved network in range whenever it sits
+  disconnected. The Wi-Fi then joins the bond automatically like any
+  hot-plugged link. The toggle is remembered across restarts.
+- **Policy fix** (admin, permanent) — click **"Stop Windows dropping Wi-Fi"**
+  in the GUI or tray menu and approve the UAC prompt. It disables the WCM
+  "minimize simultaneous connections" behaviour, so Windows itself stops
+  dropping Wi-Fi when Ethernet is up. (Script equivalent:
+  `scripts\allow-wifi-with-ethernet.ps1`, revert with `-Undo`.)
 
 ## Options
 
@@ -127,10 +169,11 @@ an app window (Edge app mode). From it you can:
 --bind <addr>         Listen address; 0.0.0.0 shares to your LAN  (default 127.0.0.1)
 --dashboard <n>       GUI port, 0 disables                        (default 8181)
 --links <spec>        Links to bond: names or IPv4s, =weight
---strategy <name>     balanced | least-busy | failover            (default balanced)
+--strategy <name>     adaptive | balanced | least-busy | failover (default adaptive)
 --server <host:port>  Bond through a braid-server for true single-stream aggregation
 --secret <token>      Shared secret for --server
 --open                Open the control panel in a browser once ready
+--wifi-assist         Keep Wi-Fi connected even while Ethernet is up
 --check-interval <s>  Seconds between health checks               (default 5)
 --check-timeout <s>   Health check timeout                        (default 3)
 --verbose             Log each proxied connection
@@ -147,6 +190,12 @@ links simultaneously — even while the capture adapter owns the default route
 
 DNS is loop-free too: braid resolves names with resolvers bound to each physical
 link (1.1.1.1 / 8.8.8.8), never through the capture adapter.
+
+The default **adaptive** strategy scores each link by measured health-check
+latency and current load (scaled by its weight), so a flaky USB Wi-Fi or a slow
+powerline adapter automatically attracts less traffic than a solid link —
+without any manual tuning. Prefer fixed proportions? Pick `balanced` and set
+weights.
 
 Reliability comes from three layers:
 
@@ -178,9 +227,17 @@ through **braid-server**, a tiny relay you run on a VPS with a public IP.
 
 braid splits each connection into 16 KB frames, sprays them across every link's
 own TCP subflow, and the server reassembles them in order (per-stream sequence
-numbers + cumulative ACKs + retransmit-on-any-surviving-link). If a link dies
-mid-download, its in-flight frames are resent over the others and the download
-never breaks.
+numbers + cumulative ACKs). The spraying is latency- and queue-aware on both
+ends: each subflow is pinged every 2 s, and frames go to the subflow with the
+lowest *queue × round-trip* score, so a slow or congested link stops attracting
+frames before it can stall the stream. Every frame remembers which subflow
+carried it — if a link dies mid-download (detected within seconds via pings or
+a TCP error), exactly its in-flight frames are re-sent over the survivors and
+the download never breaks. If *all* links blip at once, the server parks the
+streams for up to a minute so reconnecting subflows resume them.
+
+Client and server negotiate nothing fancy — but the scheduler improvements live
+on both sides, so **update the VPS's braid-server whenever you update braid**.
 
 **Run the server** (on a VPS — needs Node 18+ and TCP port 7000 reachable):
 
@@ -188,7 +245,9 @@ never breaks.
 node bin/braid-server.js --port 7000 --secret "your-shared-secret"
 ```
 
-**Point braid at it:**
+**Point braid at it** — in the GUI: *Bonded connection → Set up true bonding
+(VPS relay)*, enter host, port and secret, **Connect**. It applies immediately,
+persists across restarts, and **Disconnect** turns it off. Or on the CLI:
 
 ```powershell
 .\braid.cmd --server your-vps.example.com:7000 --secret "your-shared-secret"
@@ -231,6 +290,9 @@ src/proxy.js               SOCKS5 (TCP+UDP) / SOCKS4 / HTTP proxy engine
 src/udp.js                 SOCKS5 UDP ASSOCIATE relay (per-flow link pinning)
 src/open-browser.js        opens the control panel with no console flash
 src/capture.js             elevation launcher + capture status detection
+src/autostart.js           Start-with-Windows registry entry (source launches)
+src/wifi.js                Wi-Fi assist + one-click keep-Wi-Fi policy fix
+src/settings.js            persisted GUI settings (%APPDATA%\braid)
 src/dashboard.js           control API + GUI server (127.0.0.1:8181)
 src/dashboard.html         the control panel
 src/tunnel/frame.js        bonding wire protocol (framing + codecs)
@@ -240,10 +302,14 @@ src/tunnel/server.js       server: reassemble streams, dial targets
 engine/enable-capture.ps1  elevated: fetch engine, create adapter, own routes
 engine/disable-capture.ps1 elevated: stop engine, restore routing
 scripts/                   Windows system-proxy on/off helpers (proxy mode)
+scripts/allow-wifi-with-ethernet.ps1  stop Windows dropping Wi-Fi on Ethernet
 scripts/generate-icons.js  reproducible Windows executable/tray icon generator
 test/udp-test.js           UDP ASSOCIATE smoke test
 test/tunnel-test.js        multipath bonding integrity test (in-process)
+test/tunnel-failover-test.js  bonding survives subflows dying mid-transfer
 test/dashboard-test.js     dashboard security + control API tests
 test/desktop-test.js       desktop capture lifecycle tests
 test/links-test.js         physical/virtual adapter discovery tests
+test/dispatch-test.js      strategy picker tests (adaptive scoring, weights)
+test/settings-test.js      persisted settings round-trip tests
 ```

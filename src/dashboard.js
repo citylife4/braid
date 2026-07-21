@@ -11,7 +11,7 @@ const SECURITY_HEADERS = {
   'x-frame-options': 'DENY',
 };
 
-export function createDashboard({ manager, capture, meta, onQuit }) {
+export function createDashboard({ manager, capture, meta, onQuit, autostart = null, wifi = null, tunnelControl = null }) {
   return http.createServer(async (req, res) => {
     const url = (req.url ?? '/').split('?')[0];
     const json = (code, body) => {
@@ -31,7 +31,13 @@ export function createDashboard({ manager, capture, meta, onQuit }) {
         return;
       }
       if (req.method === 'GET' && url === '/api/stats') {
-        json(200, { ...meta(), ...manager.stats(), capture: capture.status() });
+        json(200, {
+          ...meta(),
+          ...manager.stats(),
+          capture: capture.status(),
+          ...(autostart ? { autostart: autostart.status() } : {}),
+          ...(wifi ? { wifiAssist: wifi.status() } : {}),
+        });
         return;
       }
 
@@ -65,6 +71,28 @@ export function createDashboard({ manager, capture, meta, onQuit }) {
         }
         if (url === '/api/links/weight') {
           const result = manager.setWeight(body.name, body.weight);
+          json(result.ok ? 200 : 400, result);
+          return;
+        }
+        if (url === '/api/autostart' && autostart) {
+          const result = await autostart.setEnabled(Boolean(body.enabled));
+          json(result.ok ? 200 : 400, result);
+          return;
+        }
+        if (url === '/api/wifi-assist' && wifi) {
+          const result = wifi.setEnabled(Boolean(body.enabled));
+          json(result.ok ? 200 : 400, result);
+          return;
+        }
+        if (url === '/api/wifi-policy' && wifi?.fixPolicy) {
+          // Blocks until the user answers the UAC prompt and the elevated
+          // script finishes — the GUI shows a waiting state meanwhile.
+          const result = await wifi.fixPolicy();
+          json(result.ok ? 200 : 400, result);
+          return;
+        }
+        if (url === '/api/tunnel' && tunnelControl) {
+          const result = body.enabled === false ? tunnelControl.disable() : tunnelControl.configure(body);
           json(result.ok ? 200 : 400, result);
           return;
         }
