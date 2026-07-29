@@ -1,8 +1,8 @@
 import net from 'node:net';
 
-// Errors that mean "this link could not carry the connection" - worth
-// retrying on another link. Anything else (ECONNREFUSED, DNS failure) is a
-// real answer from the network and must be reported to the client as-is.
+// Errors that make a destination worth retrying on another link. A failure to
+// reach one arbitrary host does not prove the physical link is down; only the
+// LinkManager's dedicated health checks may change global link health.
 const LINK_ERROR_CODES = new Set([
   'ENETUNREACH',
   'EHOSTUNREACH',
@@ -62,7 +62,7 @@ export function createPicker(manager) {
   };
 }
 
-export async function dial(options, host, port, { timeout = 8000, onRetry } = {}) {
+export async function dial(options, host, port, { timeout = 8000, onRetry, connect = connectVia } = {}) {
   const { manager, pick } = options;
   // Links bind IPv4 source addresses, so an IPv6 literal can never be dialed.
   // Refuse it up front rather than letting the EINVAL count as a link failure.
@@ -82,12 +82,10 @@ export async function dial(options, host, port, { timeout = 8000, onRetry } = {}
       throw lastError ?? Object.assign(new Error('no links available'), { code: 'ENOLINK' });
     }
     try {
-      const socket = await connectVia(link.address, address, port, timeout);
-      manager.noteSuccess(link);
+      const socket = await connect(link.address, address, port, timeout);
       return { socket, link };
     } catch (err) {
       if (!LINK_ERROR_CODES.has(err.code)) throw err;
-      manager.noteFailure(link, `dial ${host}:${port} failed (${err.code})`);
       excluded.add(link);
       lastError = err;
       onRetry?.(link, err);

@@ -46,7 +46,7 @@ Artifacts are written to `dist\`: an NSIS setup executable (recommended for a
 stable install path) and a no-install portable executable. Local builds are not
 code-signed, so Windows SmartScreen may show an unknown-publisher warning.
 
-Pushing a version tag such as `v3.1.3` runs the Windows release workflow. The tag
+Pushing a version tag such as `v3.3.1` runs the Windows release workflow. The tag
 must match the version in `package.json`; GitHub runs the tests, builds both `.exe`
 variants, and attaches them to a public Release automatically.
 
@@ -202,8 +202,9 @@ Reliability comes from three layers:
 1. **Active health checks** — each link TCP-dials rotating anycast targets
    (1.1.1.1 / 8.8.8.8 / 9.9.9.9) every few seconds; two consecutive failures
    mark it down.
-2. **Passive detection** — dial failures during real traffic count as strikes,
-   so dead links are caught faster than the check interval.
+2. **Destination failover** — a failed connection to one remote host retries on
+   another link, but it never marks the whole adapter down. This prevents dead
+   peers and blocked ports from being mistaken for an internet outage.
 3. **Fast failover** — a dying link's connections are killed immediately so apps
    retry at once over the survivors; new connections retry other links before
    the client ever sees an error. UDP sessions (games, calls, DNS) are pinned

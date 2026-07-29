@@ -170,6 +170,8 @@ export class LinkManager extends EventEmitter {
     socket.on('error', (err) => finish(false, `health check failed via ${target.host} (${err.code ?? err.message})`));
   }
 
+  // These counters describe active health probes, not arbitrary application
+  // destinations. A dead remote host must never change global link health.
   noteSuccess(link) {
     link.failures = 0;
     if (!link.up) {

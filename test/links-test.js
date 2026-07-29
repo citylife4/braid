@@ -55,3 +55,19 @@ test('resolveHost caches successful lookups', async () => {
   assert.equal(await manager.resolveHost('example.com'), '192.0.2.10');
   assert.equal(calls, 1, 'the second resolve must be served from the cache');
 });
+
+test('dedicated health results still control link availability', () => {
+  const manager = new LinkManager([{ name: 'Powerline', address: '127.0.0.1' }]);
+  const link = manager.links[0];
+
+  manager.noteFailure(link, 'health check timed out');
+  assert.equal(link.up, true, 'one failed probe is tolerated');
+
+  manager.noteFailure(link, 'health check timed out');
+  assert.equal(link.up, false, 'two consecutive failed probes mark the link down');
+  assert.match(manager.events.at(-1).message, /health check timed out/);
+
+  manager.noteSuccess(link);
+  assert.equal(link.up, true, 'a successful probe restores the link');
+  assert.match(manager.events.at(-1).message, /back up/);
+});
