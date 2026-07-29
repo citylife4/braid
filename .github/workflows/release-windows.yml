@@ -45,7 +45,7 @@ jobs:
           node test/tunnel-test.js 3 2
 
       - name: Build Windows release
-        run: npm run build:win
+        run: npm run build:win -- --publish never
 
       - name: Publish Windows executables
         shell: pwsh
