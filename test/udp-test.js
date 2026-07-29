@@ -61,6 +61,10 @@ control.on('data', (buf) => {
     const udp = dgram.createSocket('udp4');
     const query = dnsQuery(NAME);
     const packet = Buffer.concat([Buffer.from([0, 0, 0, 1, 8, 8, 8, 8, 0, 53]), query]);
+    // A malformed local client used to crash the whole Braid process by
+    // passing destination port 0 to dgram.send(). Send that regression case
+    // first; the valid DNS request below must still succeed afterward.
+    const zeroPort = Buffer.from([0, 0, 0, 1, 203, 0, 113, 50, 0, 0]);
     udp.on('message', (msg) => {
       const answer = firstARecord(msg.subarray(10));
       if (!answer) die('DNS reply had no A record');
@@ -69,6 +73,8 @@ control.on('data', (buf) => {
       control.destroy();
       process.exit(0);
     });
-    udp.send(packet, relayPort, relayIp);
+    udp.send(zeroPort, relayPort, relayIp, () => {
+      setTimeout(() => udp.send(packet, relayPort, relayIp), 50);
+    });
   }
 });

@@ -44,7 +44,25 @@ jobs:
           npm test
           node test/tunnel-test.js 3 2
 
-      - name: Build and publish Windows release
-        run: npm run build:win -- --publish always
+      - name: Build Windows release
+        run: npm run build:win
+
+      - name: Publish Windows executables
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $tag = $env:GITHUB_REF_NAME
+          $repo = $env:GITHUB_REPOSITORY
+          $installer = "dist/Braid-Setup-$version.exe"
+          $portable = "dist/Braid-$version.exe"
+
+          Move-Item -LiteralPath "dist/Braid Setup $version.exe" -Destination $installer
+          Move-Item -LiteralPath "dist/Braid $version.exe" -Destination $portable
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $repo --verify-tag --title $version --generate-notes
+          }
+          gh release upload $tag $installer $portable --repo $repo --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

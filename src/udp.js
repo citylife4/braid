@@ -57,8 +57,19 @@ export function startUdpAssociation({ control, clientIp, bindAddress, link, mana
 
     function send(address, port, data) {
       if (closed) return;
+      // SOCKS UDP packets are untrusted input. Node throws synchronously for
+      // an invalid destination port, so keep malformed datagrams from taking
+      // down the entire Braid service.
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        log.debug(`udp   dropped datagram with invalid destination port ${port}`);
+        return;
+      }
       link.bytesOut += data.length;
-      outbound.send(data, port, address);
+      try {
+        outbound.send(data, port, address);
+      } catch (error) {
+        log.debug(`udp   dropped datagram for ${address}:${port} (${error.code ?? error.message})`);
+      }
     }
 
     outbound.on('message', (msg, rinfo) => {
@@ -80,18 +91,21 @@ export function startUdpAssociation({ control, clientIp, bindAddress, link, mana
 }
 
 // Datagram from client: RSV(2) FRAG(1) ATYP(1) ADDR PORT(2) DATA
-function parseUdpPacket(msg) {
+export function parseUdpPacket(msg) {
   if (msg.length < 10 || msg[2] !== 0x00) return null; // fragmentation unsupported
   const atyp = msg[3];
   if (atyp === 0x01) {
     const host = `${msg[4]}.${msg[5]}.${msg[6]}.${msg[7]}`;
-    return { host, port: msg.readUInt16BE(8), data: msg.subarray(10), isDomain: false };
+    const port = msg.readUInt16BE(8);
+    if (port === 0) return null;
+    return { host, port, data: msg.subarray(10), isDomain: false };
   }
   if (atyp === 0x03) {
     const length = msg[4];
     if (msg.length < 5 + length + 2) return null;
     const name = msg.subarray(5, 5 + length).toString('utf8');
     const port = msg.readUInt16BE(5 + length);
+    if (port === 0) return null;
     const data = msg.subarray(5 + length + 2);
     // Some clients put dotted IPs in the domain field.
     return { host: name, port, data, isDomain: net.isIP(name) === 0 };
