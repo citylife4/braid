@@ -46,7 +46,7 @@ Artifacts are written to `dist\`: an NSIS setup executable (recommended for a
 stable install path) and a no-install portable executable. Local builds are not
 code-signed, so Windows SmartScreen may show an unknown-publisher warning.
 
-Pushing a version tag such as `v3.3.1` runs the Windows release workflow. The tag
+Pushing a version tag such as `v3.3.3` runs the Windows release workflow. The tag
 must match the version in `package.json`; GitHub runs the tests, builds both `.exe`
 variants, and attaches them to a public Release automatically.
 
