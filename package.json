@@ -20,10 +20,11 @@
     "build:win": "electron-builder --win --x64",
     "server": "node bin/braid-server.js",
     "list": "node bin/braid.js --list",
-    "test": "node --test test/dashboard-test.js test/desktop-test.js test/links-test.js test/dispatch-test.js test/settings-test.js test/udp-parser-test.js",
+    "test": "node --test test/dashboard-test.js test/desktop-test.js test/links-test.js test/dispatch-test.js test/settings-test.js test/udp-parser-test.js test/engine-test.js test/udp-flows-test.js",
     "test:udp": "node test/udp-test.js",
     "test:tunnel": "node test/tunnel-test.js",
-    "test:failover": "node test/tunnel-failover-test.js"
+    "test:failover": "node test/tunnel-failover-test.js",
+    "test:abort": "node test/tunnel-abort-test.js"
   },
   "engines": {
     "node": ">=18"

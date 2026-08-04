@@ -2,7 +2,7 @@ import net from 'node:net';
 import { Duplex } from 'node:stream';
 import { randomBytes } from 'node:crypto';
 import {
-  T, FrameParser, encodeHello, encodeOpen, encodePing, encodePong,
+  T, FrameParser, encodeHello, encodeOpen, encodePing, encodePong, encodeReset,
   readStreamId, decodeOpenErr, decodeData, decodeSeq,
 } from './frame.js';
 import { StreamEngine } from './stream-engine.js';
@@ -57,7 +57,12 @@ class TunnelStream extends Duplex {
     this.engine.resumeDelivery();
   }
   _destroy(err, cb) {
+    // Destroyed with an error: abort the stream on both ends right away.
+    // Destroyed without one (the proxy tearing down a closed app socket):
+    // let the engine flush its tail, but mark it orphaned so it resets the
+    // moment data can no longer be delivered instead of stalling forever.
     if (err) this.engine.reset();
+    else this.engine.orphan();
     cb(err);
   }
 }
@@ -109,6 +114,7 @@ export class TunnelClient {
     }
     for (const timer of this.reconnects) clearTimeout(timer);
     this.reconnects.clear();
+    this.pending = [];
     for (const sf of this.subflows.values()) sf.socket.destroy();
     for (const stream of [...this.streams.values()]) stream.destroy();
     for (const engine of this.engines.values()) engine.destroy();
@@ -181,6 +187,9 @@ export class TunnelClient {
         this.log.info(`tunnel: subflow up via ${sf.link.name} (${sf.link.address})`);
         this.resolveReady();
         this.drainPending();
+        // DATA/FIN frames that found no subflow are parked in their engine
+        // (via=null) rather than in the pending queue; dispatch them now.
+        for (const engine of this.engines.values()) engine.retransmitFor(null);
         break;
       case T.PONG:
         sf.lastPong = Date.now();
@@ -196,8 +205,12 @@ export class TunnelClient {
         sf.socket.write(encodePong());
         break;
       case T.OPEN_OK: {
-        const w = this.opening.get(readStreamId(body));
-        w?.resolve();
+        const streamId = readStreamId(body);
+        const w = this.opening.get(streamId);
+        if (w) w.resolve();
+        // The server dialed a target for an open we already abandoned
+        // (timeout): tell it to close, or the target socket leaks over there.
+        else if (!this.engines.has(streamId)) this._send(encodeReset(streamId));
         break;
       }
       case T.OPEN_ERR: {
@@ -207,7 +220,12 @@ export class TunnelClient {
       }
       case T.DATA: {
         const { streamId, seq, payload } = decodeData(body);
-        this.engines.get(streamId)?.dataReceived(seq, payload);
+        const engine = this.engines.get(streamId);
+        // DATA for a stream we no longer know = the peer missed our teardown.
+        // Answer RESET (like a TCP RST) so it stops sending. Recently-closed
+        // engines linger in the map, so ordinary stragglers stay quiet.
+        if (engine) engine.dataReceived(seq, payload);
+        else this._send(encodeReset(streamId));
         break;
       }
       case T.ACK: {
@@ -217,7 +235,9 @@ export class TunnelClient {
       }
       case T.FIN: {
         const { streamId, seq } = decodeSeq(body);
-        this.engines.get(streamId)?.finReceived(seq);
+        const engine = this.engines.get(streamId);
+        if (engine) engine.finReceived(seq);
+        else this._send(encodeReset(streamId));
         break;
       }
       case T.RESET: {
@@ -240,7 +260,7 @@ export class TunnelClient {
     let bestScore = Infinity;
     let fallback = null;
     for (const sf of this.subflows.values()) {
-      if (!sf.ready) continue;
+      if (!sf.ready || sf.socket.destroyed) continue;
       const rtt = Math.max(sf.srtt ?? DEFAULT_RTT, 5);
       const score = (sf.socket.writableLength + 1) * rtt / (forData ? (sf.link.weight || 1) : 1);
       if (sf.link.name === avoid) {
@@ -258,9 +278,13 @@ export class TunnelClient {
   _send(frame, avoid = null) {
     // Control frames (ACKs, opens, resets) are tiny and latency-critical:
     // route them by pure responsiveness, not by data-spreading weight.
-    const sf = this.pickSubflow(frame[4] === T.DATA, avoid);
+    const type = frame[4];
+    const sf = this.pickSubflow(type === T.DATA, avoid);
     if (!sf) {
-      this.pending.push(frame);
+      // DATA/FIN live in their stream's unacked list (via=null) and are
+      // re-dispatched when a subflow returns; queueing them here too would
+      // send duplicates. Only park control frames.
+      if (type !== T.DATA && type !== T.FIN) this.pending.push(frame);
       return null;
     }
     sf.socket.write(frame);
@@ -296,6 +320,7 @@ export class TunnelClient {
   }
 
   async open(host, port) {
+    if (this.closed) throw objErr('tunnel is stopped', 'ENOLINK');
     await this.ready();
     const id = this.nextId++;
     const stream = new TunnelStream(this, id);
@@ -330,12 +355,15 @@ export class TunnelClient {
   tick() {
     const now = Date.now();
     for (const sf of this.subflows.values()) {
-      if (!sf.ready) continue;
+      // lastPong starts at connect time, so this also reaps subflows whose
+      // TCP connect or HELLO handshake silently hangs (wrong server, black
+      // hole route) — otherwise they would block reconnects forever.
       if (now - sf.lastPong > DEAD_MS) {
         this.log.warn(`tunnel: subflow via ${sf.link.name} unresponsive — recycling`);
         sf.socket.destroy();
         continue;
       }
+      if (!sf.ready) continue;
       if (now - sf.lastPing >= PING_MS) {
         sf.lastPing = now;
         if (!sf.pingSentAt) sf.pingSentAt = now; // keep the oldest unanswered ping
@@ -344,7 +372,9 @@ export class TunnelClient {
     }
     for (const [id, engine] of this.engines) {
       engine.tick(now);
-      if (engine.isFinished()) {
+      // Closed engines (reset locally or by the peer) linger like finished
+      // ones so straggler frames die quietly, then get reaped.
+      if (engine.closed || engine.isFinished()) {
         if (!engine.doneAt) engine.doneAt = now;
         else if (now - engine.doneAt > LINGER_MS) {
           engine.destroy();

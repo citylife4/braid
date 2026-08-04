@@ -23,7 +23,9 @@ export function startUdpAssociation({ control, clientIp, bindAddress, link, mana
       clearTimeout(idleTimer);
       try { relay.close(); } catch { /* already closed */ }
       try { outbound.close(); } catch { /* already closed */ }
-      manager.untrackUdp(link);
+      // trackUdp only ran once both sockets were bound; a failed setup must
+      // not decrement the counter below zero.
+      if (ready) manager.untrackUdp(link);
       control.destroy();
       if (!ready) reject(reason instanceof Error ? reason : new Error(String(reason ?? 'udp setup failed')));
       log.debug(`udp   association via ${link.name} closed`);

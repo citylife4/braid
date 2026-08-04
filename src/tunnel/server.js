@@ -1,12 +1,15 @@
 import net from 'node:net';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import {
-  T, FrameParser, encodeHelloOk, encodeOpenOk, encodeOpenErr, encodePing, encodePong,
+  T, FrameParser, encodeHelloOk, encodeOpenOk, encodeOpenErr, encodePing, encodePong, encodeReset,
   readStreamId, decodeHello, decodeOpen, decodeData, decodeSeq,
 } from './frame.js';
 import { StreamEngine } from './stream-engine.js';
 
 const LINGER_MS = 10000;
 const TUNNEL_IDLE_MS = 60000;
+const HELLO_TIMEOUT_MS = 10000; // drop connections that never authenticate
+const PENDING_MAX = 4096; // parked control frames while no subflow is up
 // The server pings each subflow itself: the measured round-trip feeds the
 // downlink scheduler (most of a download's bytes flow server -> client), and
 // a subflow that stops answering is recycled in seconds so its frames move
@@ -27,6 +30,7 @@ class ServerTunnel {
     this.log = log;
     this.subflows = new Set();
     this.streams = new Map(); // streamId -> { engine, target }
+    this.pending = []; // control frames waiting for a subflow to return
     this.lastSeen = Date.now();
     this.nextSubflowId = 1;
   }
@@ -34,6 +38,10 @@ class ServerTunnel {
   addSubflow(socket) {
     const sf = { id: this.nextSubflowId++, socket, lastPong: Date.now(), lastPing: 0, pingSentAt: 0, srtt: null };
     this.subflows.add(sf);
+    // Control frames (OPEN_OK, ACKs) parked while every subflow was gone.
+    const queued = this.pending;
+    this.pending = [];
+    for (const frame of queued) this.send(frame);
     // Frames that had no subflow to ride (all links blipped at once) are
     // tagged via=null; dispatch them now instead of waiting out an RTO.
     for (const { engine } of this.streams.values()) engine.retransmitFor(null);
@@ -54,6 +62,7 @@ class ServerTunnel {
     let bestScore = Infinity;
     let fallback = null;
     for (const sf of this.subflows) {
+      if (sf.socket.destroyed) continue;
       const rtt = Math.max(sf.srtt ?? DEFAULT_RTT, 5);
       const score = (sf.socket.writableLength + 1) * rtt;
       if (sf.id === avoid) {
@@ -70,7 +79,16 @@ class ServerTunnel {
 
   send(frame, avoid = null) {
     const sf = this.pickSubflow(avoid);
-    if (!sf) return null;
+    if (!sf) {
+      // DATA/FIN sit in their engine's unacked list and are re-dispatched by
+      // addSubflow; dropping a control frame (OPEN_OK, ACK) instead would
+      // stall its stream until an RTO, so park those.
+      const type = frame[4];
+      if (type !== T.DATA && type !== T.FIN && this.pending.length < PENDING_MAX) {
+        this.pending.push(frame);
+      }
+      return null;
+    }
     sf.socket.write(frame);
     return sf.id;
   }
@@ -96,7 +114,11 @@ class ServerTunnel {
         break;
       case T.DATA: {
         const { streamId, seq, payload } = decodeData(body);
-        this.streams.get(streamId)?.engine.dataReceived(seq, payload);
+        const rec = this.streams.get(streamId);
+        // DATA for an unknown stream = the client missed our teardown; answer
+        // RESET (like a TCP RST) so it stops retransmitting into the void.
+        if (rec) rec.engine.dataReceived(seq, payload);
+        else this.send(encodeReset(streamId));
         break;
       }
       case T.ACK: {
@@ -106,7 +128,9 @@ class ServerTunnel {
       }
       case T.FIN: {
         const { streamId, seq } = decodeSeq(body);
-        this.streams.get(streamId)?.engine.finReceived(seq);
+        const rec = this.streams.get(streamId);
+        if (rec) rec.engine.finReceived(seq);
+        else this.send(encodeReset(streamId));
         break;
       }
       case T.RESET:
@@ -119,7 +143,15 @@ class ServerTunnel {
 
   onOpen({ streamId, host, port }) {
     if (this.streams.has(streamId)) return;
-    const target = net.connect({ host, port, noDelay: true, localAddress: this.dialFrom });
+    let target;
+    try {
+      // net.connect throws synchronously on invalid input (port 0, bad host
+      // string). That must fail this one stream, not the whole subflow.
+      target = net.connect({ host, port, noDelay: true, localAddress: this.dialFrom });
+    } catch {
+      this.send(encodeOpenErr(streamId, 1));
+      return;
+    }
     const rec = { engine: null, target, opened: false };
     this.streams.set(streamId, rec);
 
@@ -145,6 +177,7 @@ class ServerTunnel {
     target.on('error', (err) => {
       if (!rec.opened) this.send(encodeOpenErr(streamId, ERR_TO_CODE[err.code] ?? 1));
       else engine.reset();
+      engine.destroy(); // stop any pending ack timer for the dead stream
       this.streams.delete(streamId);
     });
     target.on('close', () => {
@@ -167,7 +200,7 @@ class ServerTunnel {
     }
     for (const [id, rec] of this.streams) {
       rec.engine.tick(now);
-      if (rec.engine.isFinished()) {
+      if (rec.engine.closed || rec.engine.isFinished()) {
         if (!rec.engine.doneAt) rec.engine.doneAt = now;
         else if (now - rec.engine.doneAt > LINGER_MS) {
           rec.engine.destroy();
@@ -187,9 +220,14 @@ class ServerTunnel {
   }
 }
 
+const tokenHash = (value) => createHash('sha256').update(String(value)).digest();
+
 export class TunnelServer {
   constructor({ secret = '', dialFrom = undefined, log }) {
     this.secret = secret;
+    // Compare fixed-length digests so the check leaks no timing information
+    // about how much of the secret matched.
+    this.secretHash = secret ? tokenHash(secret) : null;
     this.dialFrom = dialFrom;
     this.log = log;
     this.tunnels = new Map();
@@ -212,6 +250,11 @@ export class TunnelServer {
     const parser = new FrameParser();
     let tunnel = null;
     let sf = null;
+    // A connection that never completes HELLO must not hold a socket open
+    // forever (port scanners, misdirected clients).
+    const helloTimer = setTimeout(() => {
+      if (!tunnel) socket.destroy();
+    }, HELLO_TIMEOUT_MS);
 
     socket.on('data', (chunk) => {
       try {
@@ -219,7 +262,7 @@ export class TunnelServer {
           if (!tunnel) {
             if (type !== T.HELLO) throw new Error('expected HELLO');
             const { tunnelId, token } = decodeHello(body);
-            if (this.secret && token !== this.secret) {
+            if (this.secretHash && !timingSafeEqual(tokenHash(token), this.secretHash)) {
               this.log.warn('server: rejected subflow with bad secret');
               socket.destroy();
               return;
@@ -244,6 +287,7 @@ export class TunnelServer {
     });
 
     socket.on('close', () => {
+      clearTimeout(helloTimer);
       this.connections -= 1;
       if (tunnel && sf) {
         tunnel.removeSubflow(sf);

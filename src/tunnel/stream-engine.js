@@ -25,6 +25,10 @@ const RTO_MAX = 4000;
 // first unblocks the receiver's head-of-line without duplicating a whole
 // window's worth of data the way a blanket retransmit would.
 const RETRANSMIT_BATCH = 64; // frames (~1 MB at 16 KB CHUNK)
+// How long an engine whose local sink is gone may keep flushing its send tail
+// before it gives up and resets. Long enough for a slow link to drain the
+// window, short enough that aborted streams cannot pile up.
+const ORPHAN_MS = 30000;
 
 const FIN_MARK = Symbol('fin');
 
@@ -54,6 +58,15 @@ export class StreamEngine {
 
     this.closed = false;
     this.doneAt = 0;
+    this.orphanedAt = 0;
+  }
+
+  // The local sink (app socket / target) was destroyed without a clean end.
+  // The engine lives on briefly to flush any already-written tail, but tick()
+  // resets the stream the moment arriving data has nowhere to be delivered,
+  // or once the flush grace period runs out.
+  orphan() {
+    if (!this.orphanedAt) this.orphanedAt = Date.now();
   }
 
   canSend() {
@@ -69,6 +82,7 @@ export class StreamEngine {
 
   // App/target -> wire. Splits into CHUNK-sized DATA frames.
   write(chunk) {
+    if (this.closed) return;
     let off = 0;
     do {
       const slice = chunk.subarray(off, off + CHUNK);
@@ -82,7 +96,7 @@ export class StreamEngine {
   }
 
   finish() {
-    if (this.finSent) return;
+    if (this.finSent || this.closed) return;
     this.finSent = true;
     const seq = this.seqNext++;
     const entry = { frame: encodeFin(this.id, seq), len: 0, via: null, sentAt: 0 };
@@ -92,6 +106,7 @@ export class StreamEngine {
 
   // Cumulative ACK: peer has contiguously received everything below nextSeq.
   ackReceived(nextSeq) {
+    if (this.closed) return;
     const wasFull = !this.canSend();
     let advanced = false;
     for (const [seq, entry] of this.unacked) {
@@ -108,6 +123,7 @@ export class StreamEngine {
   }
 
   dataReceived(seq, payload) {
+    if (this.closed) return;
     if (seq >= this.rcvNext && !this.reorder.has(seq)) {
       this.reorder.set(seq, payload);
       this.flush();
@@ -116,6 +132,7 @@ export class StreamEngine {
   }
 
   finReceived(seq) {
+    if (this.closed) return;
     if (seq >= this.rcvNext && !this.reorder.has(seq)) {
       this.reorder.set(seq, FIN_MARK);
       this.flush();
@@ -172,6 +189,14 @@ export class StreamEngine {
   // receiver's head-of-line), each preferably on a different subflow than
   // the one that stalled.
   tick(now) {
+    if (this.closed) return;
+    // Orphaned engine: reset as soon as delivery stalls (data arrived that the
+    // dead sink can never take) or when the flush grace period expires.
+    if (this.orphanedAt && !this.isFinished()
+      && (this.paused || this.reorder.size || now - this.orphanedAt > ORPHAN_MS)) {
+      this.reset();
+      return;
+    }
     if (!this.unacked.size || now - this.lastProgress <= this.rto) return;
     let sent = 0;
     for (const entry of this.unacked.values()) {

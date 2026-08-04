@@ -136,7 +136,7 @@ function resolveLinks(spec) {
     if (!available.length) fail('no usable IPv4 interfaces found');
     return available.map((iface) => ({ name: iface.name, address: iface.address, weight: 1, pinned: false }));
   }
-  return spec.split(',').map((raw) => {
+  const defs = spec.split(',').map((raw) => {
     const [id, weightRaw] = raw.trim().split('=');
     const weight = weightRaw === undefined ? 1 : Number(weightRaw);
     if (!Number.isFinite(weight) || weight <= 0) fail(`invalid weight in "${raw.trim()}"`);
@@ -150,6 +150,14 @@ function resolveLinks(spec) {
     }
     return { name: match.name, address: match.address, weight, pinned: false };
   });
+  // Names key everything downstream (toggles, weights, tunnel subflows), so
+  // the same link listed twice must be an input error, not two links.
+  const seen = new Set();
+  for (const def of defs) {
+    if (seen.has(def.name)) fail(`duplicate link "${def.name}" in --links`);
+    seen.add(def.name);
+  }
+  return defs;
 }
 
 const args = parseArgs(process.argv);
@@ -259,9 +267,16 @@ const tunnelControl = {
 };
 
 // CLI flags win for this run; otherwise the GUI-saved server reconnects.
+// The settings file is user-editable, so validate it instead of trusting it.
+function savedTunnelConfig(saved) {
+  if (!saved || typeof saved.host !== 'string' || !saved.host.trim()) return null;
+  const port = Number(saved.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host: saved.host.trim(), port, secret: typeof saved.secret === 'string' ? saved.secret : '' };
+}
 const initialTunnel = args.server
   ? { host: args.server.host, port: args.server.port, secret: args.secret }
-  : (settings.tunnel?.host ? settings.tunnel : null);
+  : savedTunnelConfig(settings.tunnel);
 
 const dashboardUrl = `http://127.0.0.1:${args.dashboard}`;
 
